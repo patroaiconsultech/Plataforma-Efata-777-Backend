@@ -1,15 +1,18 @@
 from logging.config import fileConfig
 from alembic import context
-from sqlalchemy import engine_from_config,pool
-from orkio_v2.database import Base
+from sqlalchemy import create_engine,pool
+from orkio_v2.config import get_settings
+from orkio_v2.database import Base, normalize_database_url
 from orkio_v2 import models
 config=context.config
 target_metadata=Base.metadata
+def resolve_url() -> str:
+    return normalize_database_url(get_settings().database_url)
 def run_migrations_offline():
-    context.configure(url=config.get_main_option("sqlalchemy.url"),target_metadata=target_metadata,literal_binds=True)
+    context.configure(url=resolve_url(),target_metadata=target_metadata,literal_binds=True)
     with context.begin_transaction(): context.run_migrations()
 def run_migrations_online():
-    connectable=engine_from_config(config.get_section(config.config_ini_section),prefix="sqlalchemy.",poolclass=pool.NullPool)
+    connectable=create_engine(resolve_url(),poolclass=pool.NullPool)
     with connectable.connect() as connection:
         context.configure(connection=connection,target_metadata=target_metadata)
         with context.begin_transaction(): context.run_migrations()
