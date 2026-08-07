@@ -57,7 +57,7 @@ def test_ready_rejects_any_missing_model_table(client):
         AuditEvent.__table__.create(engine)
 
 
-def test_message_ignores_client_supplied_agent(client, monkeypatch):
+def test_message_rejects_unregistered_client_agent(client, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "openai_api_key", "test-key", raising=False)
 
@@ -75,25 +75,11 @@ def test_message_ignores_client_supplied_agent(client, monkeypatch):
         json={"content": "oi", "agent": "Fake Admin"},
         headers=headers(),
     )
-    assert response.status_code == 200
-    assert response.json()["agent_name"] == llm.CANONICAL_AGENT_NAME
-
-    stored = client.get(
-        f"/api/v2/threads/{thread['id']}/messages",
-        headers=headers(),
-    ).json()
-    agent = [item for item in stored if item["author_type"] == "agent"][0]
-    assert agent["agent_name"] == llm.CANONICAL_AGENT_NAME
-
-    with Testing() as db:
-        row = db.get(
-            __import__("orkio_v2.models", fromlist=["Message"]).Message,
-            response.json()["message_id"],
-        )
-        assert row.author_id == llm.CANONICAL_AGENT_ID
+    assert response.status_code == 404
+    assert response.json()["detail"] == "AGENT_NOT_FOUND"
 
 
-def test_stream_ignores_client_supplied_agent(client, monkeypatch):
+def test_stream_rejects_unregistered_client_agent(client, monkeypatch):
     settings = get_settings()
     monkeypatch.setattr(settings, "openai_api_key", "test-key", raising=False)
 
@@ -111,10 +97,8 @@ def test_stream_ignores_client_supplied_agent(client, monkeypatch):
         json={"content": "oi", "agent": "Fake Admin"},
         headers=headers(),
     )
-    assert response.status_code == 200
-    assert '"agent": "Orkio"' in response.text
-    assert '"agent_name": "Orkio"' in response.text
-    assert "Fake Admin" not in response.text
+    assert response.status_code == 404
+    assert response.json()["detail"] == "AGENT_NOT_FOUND"
 
 
 class FakeIntrospectionResponse:
@@ -141,6 +125,8 @@ def oidc_settings() -> Settings:
         ),
         PLATFORM_OIDC_INTROSPECTION_CLIENT_ID="backend",
         PLATFORM_OIDC_INTROSPECTION_CLIENT_SECRET="secret",
+        PLATFORM_OIDC_TENANT_CLAIM="tenant_id",
+        PLATFORM_OIDC_ROLES_CLAIM="roles",
     )
 
 
@@ -203,3 +189,34 @@ def test_docker_image_contains_migration_runtime_files():
     assert "COPY pyproject.toml alembic.ini ./" in dockerfile
     assert "COPY migrations ./migrations" in dockerfile
     assert "COPY scripts ./scripts" in dockerfile
+
+
+def test_test_auth_requires_and_preserves_external_subject():
+    settings = Settings(
+        PLATFORM_ENVIRONMENT="test",
+        PLATFORM_AUTH_MODE="test",
+        PLATFORM_INVITATION_TOKEN_SECRET="x" * 40,
+    )
+    with pytest.raises(HTTPException) as raised:
+        require_principal(
+            authorization=None,
+            x_test_user="user-1",
+            x_test_tenant="tenant-1",
+            x_test_roles="admin",
+            x_test_email="owner@example.com",
+            x_test_subject=None,
+            settings=settings,
+        )
+    assert raised.value.status_code == 401
+    assert raised.value.detail == "TEST_SUBJECT_REQUIRED"
+
+    principal = require_principal(
+        authorization=None,
+        x_test_user="user-1",
+        x_test_tenant="tenant-1",
+        x_test_roles="admin",
+        x_test_email="owner@example.com",
+        x_test_subject="sub-1",
+        settings=settings,
+    )
+    assert principal.external_subject == "sub-1"

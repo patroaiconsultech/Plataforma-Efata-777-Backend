@@ -12,8 +12,21 @@ from .schemas import *
 from .services.invitations import create_invitation, accept_invitation
 from .services.identity import require_provisioned_principal, require_known_principal, assert_provisioned
 from .services import llm
+from .agents.registry import AgentNotFound, list_agents
+from .services.execution_router import resolve_direct_execution
 
 router=APIRouter(prefix="/api/v2")
+
+@router.get("/agents")
+def agents_catalog(p:Principal=Depends(require_provisioned_principal)):
+    return [{"slug": a.slug, "display_name": a.display_name, "target_kind": a.target_kind.value}
+            for a in list_agents()]
+
+def _resolve_execution_or_404(requested_target: str):
+    try:
+        return resolve_direct_execution(requested_target)
+    except AgentNotFound as exc:
+        raise HTTPException(404, "AGENT_NOT_FOUND") from exc
 
 INVITE_ALLOWED_ROLES={ThreadRole.owner.value, ThreadRole.moderator.value}
 
@@ -162,6 +175,7 @@ async def send_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(r
                        settings:Settings=Depends(get_settings),db:Session=Depends(get_db)):
     _,member=thread_access(db,thread_id,p)
     if member.thread_role==ThreadRole.viewer.value: raise HTTPException(403,"THREAD_READ_ONLY")
+    execution=_resolve_execution_or_404(payload.agent)
     try:
         llm.ensure_configured(settings)
     except llm.LLMNotConfigured:
@@ -172,16 +186,18 @@ async def send_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(r
     history=_history(db,thread_id,p.tenant_id)
 
     try:
-        answer=await llm.generate(settings,llm.CANONICAL_AGENT_NAME,history)
+        answer=await llm.generate(settings,execution.resolved_target,history)
     except llm.LLMNotConfigured:
         raise HTTPException(503,"LLM_NOT_CONFIGURED")
     except llm.LLMUpstreamError:
         raise HTTPException(502,"LLM_UPSTREAM_ERROR")
 
     assistant=Message(tenant_id=p.tenant_id,thread_id=thread_id,author_type="agent",
-                      author_id=llm.CANONICAL_AGENT_ID,agent_name=llm.CANONICAL_AGENT_NAME,content=answer)
+                      author_id=execution.turn_owner,agent_name=execution.display_agent,content=answer)
     db.add(assistant); db.commit()
-    return {"message_id":assistant.id,"agent_name":llm.CANONICAL_AGENT_NAME,"content":answer}
+    return {"message_id":assistant.id,"agent_name":execution.display_agent,"content":answer,
+            "execution":{"resolved_target":execution.resolved_target,"turn_owner":execution.turn_owner,
+                         "execution_engine":execution.execution_engine.value,"ownership_locked":execution.ownership_locked}}
 
 @router.post("/threads/{thread_id}/stream")
 async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(require_provisioned_principal),
@@ -195,6 +211,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
     _,member=thread_access(db,thread_id,p)
     if member.thread_role==ThreadRole.viewer.value: raise HTTPException(403,"THREAD_READ_ONLY")
     if not settings.realtime_streaming_enabled: raise HTTPException(403,"REALTIME_STREAMING_DISABLED")
+    execution=_resolve_execution_or_404(payload.agent)
 
     configured=True
     try:
@@ -202,7 +219,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
     except llm.LLMNotConfigured:
         configured=False
 
-    agent=llm.CANONICAL_AGENT_NAME
+    agent=execution.resolved_target
     tenant_id=p.tenant_id
     user_id=p.user_id
 
@@ -250,7 +267,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
         message_id=None
         try:
             row=Message(tenant_id=tenant_id,thread_id=thread_id,author_type="agent",
-                        author_id=llm.CANONICAL_AGENT_ID,agent_name=llm.CANONICAL_AGENT_NAME,content=answer)
+                        author_id=execution.turn_owner,agent_name=execution.display_agent,content=answer)
             db.add(row); db.commit()
             message_id=row.id
         except Exception:
@@ -259,7 +276,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
             yield sse("done",{"status":"failed"})
             return
 
-        yield sse("done",{"status":"completed","message_id":message_id,"agent_name":llm.CANONICAL_AGENT_NAME})
+        yield sse("done",{"status":"completed","message_id":message_id,"agent_name":execution.display_agent,"resolved_target":execution.resolved_target,"turn_owner":execution.turn_owner,"execution_engine":execution.execution_engine.value,"ownership_locked":execution.ownership_locked})
 
     return StreamingResponse(events(),media_type="text/event-stream",
                              headers={"Cache-Control":"no-store","X-Accel-Buffering":"no"})

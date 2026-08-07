@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 import httpx
 
 from ..config import Settings
+from ..agents.registry import resolve_agent
 
 DEFAULT_OPENAI_BASE = "https://api.openai.com/v1"
 CANONICAL_AGENT_ID = "orkio"
@@ -56,7 +57,11 @@ def ensure_configured(settings: Settings) -> str:
 
 
 def _payload(settings: Settings, agent: str, history: list[dict], stream: bool) -> dict:
-    messages = [{"role": "system", "content": f"{SYSTEM_PROMPT} Seu nome nesta conversa é {CANONICAL_AGENT_NAME}."}]
+    resolved = resolve_agent(agent)
+    messages = [{"role": "system", "content": (
+        f"{SYSTEM_PROMPT} Seu nome nesta conversa é {resolved.display_name}. "
+        f"{resolved.system_instruction} Não alegue ter usado ferramentas que não foram explicitamente disponibilizadas."
+    )}]
     messages.extend(history)
     return {
         "model": settings.openai_model,
