@@ -44,9 +44,17 @@ def client():
         db.add(Membership(tenant_id="tenant-1",user_id="user-1",role="admin"))
         db.commit()
     return TestClient(app)
-def headers(user="user-1",roles="admin",tenant="tenant-1"):
+def headers(user="user-1",roles="admin",tenant="tenant-1",subject=None):
     email = "guest@example.com" if user == "user-2" else "owner@example.com"
-    return {"X-Test-User":user,"X-Test-Tenant":tenant,"X-Test-Roles":roles,"X-Test-Email":email}
+    if subject is None:
+        subject = user.replace("user-", "sub-", 1) if user.startswith("user-") else user
+    return {
+        "X-Test-User": user,
+        "X-Test-Tenant": tenant,
+        "X-Test-Roles": roles,
+        "X-Test-Email": email,
+        "X-Test-Subject": subject,
+    }
 
 
 @pytest.fixture()

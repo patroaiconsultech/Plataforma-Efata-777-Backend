@@ -7,7 +7,7 @@ import pytest
 
 
 TENANT = "org-1"
-ROLES_CLAIM = "urn:zitadel:iam:org:project:385220733510354436:roles"
+ROLES_CLAIM = "urn:zitadel:iam:org:project:roles"
 
 
 def base_payload():
@@ -88,3 +88,17 @@ def test_safe_diagnostics_never_contains_claim_values():
     assert TENANT not in serialized
     assert "patroai.example" not in serialized
     assert result["roles_claim_type"] == "mapping"
+
+
+
+def test_zitadel_claim_defaults_match_runtime_contract():
+    from orkio_v2.config import Settings
+
+    settings = Settings(
+        PLATFORM_ENVIRONMENT="test",
+        PLATFORM_AUTH_MODE="test",
+        PLATFORM_INVITATION_TOKEN_SECRET="x" * 40,
+    )
+    assert settings.oidc_user_claim == "sub"
+    assert settings.oidc_tenant_claim == "urn:zitadel:iam:user:resourceowner:id"
+    assert settings.oidc_roles_claim == "urn:zitadel:iam:org:project:roles"

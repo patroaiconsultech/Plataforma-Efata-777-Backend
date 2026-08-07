@@ -35,6 +35,7 @@ def require_principal(
     x_test_tenant: str | None = Header(None, alias="X-Test-Tenant"),
     x_test_roles: str | None = Header(None, alias="X-Test-Roles"),
     x_test_email: str | None = Header(None, alias="X-Test-Email"),
+    x_test_subject: str | None = Header(None, alias="X-Test-Subject"),
     settings: Settings = Depends(get_settings),
 ) -> Principal:
     if settings.auth_mode == "test":
@@ -42,12 +43,14 @@ def require_principal(
             raise HTTPException(500, "TEST_AUTH_FORBIDDEN")
         if not x_test_user or not x_test_tenant:
             raise HTTPException(401, "TEST_IDENTITY_REQUIRED")
+        if not x_test_subject:
+            raise HTTPException(401, "TEST_SUBJECT_REQUIRED")
         return Principal(
             x_test_user,
             x_test_tenant,
             tuple(filter(None, (x_test_roles or "member").split(","))),
             x_test_email,
-            x_test_user,
+            x_test_subject,
         )
     if settings.auth_mode == "external_required":
         raise HTTPException(status_code=401, detail="AUTH_PROVIDER_REQUIRED")
