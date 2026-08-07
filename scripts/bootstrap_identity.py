@@ -16,6 +16,7 @@ import sys
 from dataclasses import asdict, dataclass
 
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from orkio_v2.database import SessionLocal
@@ -111,6 +112,33 @@ def apply_plan(
     db.commit()
 
 
+
+def safe_database_error_details(exc: Exception) -> dict[str, str | None]:
+    """Return only non-sensitive database diagnostics.
+
+    Never returns exception messages, SQL statements, parameters,
+    connection strings, credentials, or provider tokens.
+    """
+    details: dict[str, str | None] = {
+        "error_type": type(exc).__name__,
+        "sqlstate": None,
+        "constraint": None,
+    }
+
+    if isinstance(exc, DBAPIError):
+        original = getattr(exc, "orig", None)
+        sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
+        diag = getattr(original, "diag", None)
+        constraint = getattr(diag, "constraint_name", None) if diag is not None else None
+
+        if isinstance(sqlstate, str) and len(sqlstate) <= 10:
+            details["sqlstate"] = sqlstate
+        if isinstance(constraint, str) and len(constraint) <= 128:
+            details["constraint"] = constraint
+
+    return details
+
+
 def main() -> int:
     args = parser().parse_args()
     with SessionLocal() as db:
@@ -150,16 +178,14 @@ def main() -> int:
 
         try:
             apply_plan(db, plan)
-        except Exception:
+        except Exception as exc:
             db.rollback()
-            print(
-                json.dumps(
-                    {
-                        "status": "FAILED",
-                        "write_executed": False,
-                    }
-                )
-            )
+            failure = {
+                "status": "FAILED",
+                "write_executed": False,
+                **safe_database_error_details(exc),
+            }
+            print(json.dumps(failure))
             return 4
 
         print(
