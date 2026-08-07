@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-4o-mini", alias="OPENAI_DEFAULT_MODEL")
+    openai_api_base: str | None = Field(None, alias="OPENAI_API_BASE")
     realtime_streaming_enabled: bool = Field(True, alias="PLATFORM_REALTIME_STREAMING_ENABLED")
 
     invitation_secret: str = Field("development-only-change-me-32chars", alias="PLATFORM_INVITATION_TOKEN_SECRET")

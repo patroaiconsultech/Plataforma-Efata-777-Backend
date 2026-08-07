@@ -43,6 +43,9 @@ def require_principal(
         raise HTTPException(status_code=503, detail="IDENTITY_PROVIDER_UNAVAILABLE") from exc
     if not data.get("active"):
         raise HTTPException(status_code=401, detail="TOKEN_INACTIVE")
+    issuer = data.get("iss")
+    if not issuer or str(issuer) != str(settings.oidc_issuer):
+        raise HTTPException(status_code=401, detail="TOKEN_ISSUER_INVALID")
     audience = data.get("aud", [])
     audience = [audience] if isinstance(audience, str) else audience
     if settings.oidc_audience not in audience:
