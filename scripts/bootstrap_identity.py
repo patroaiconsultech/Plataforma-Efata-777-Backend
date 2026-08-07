@@ -16,7 +16,6 @@ import sys
 from dataclasses import asdict, dataclass
 
 from sqlalchemy import select
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from orkio_v2.database import SessionLocal
@@ -100,14 +99,6 @@ def apply_plan(
                 display_name=plan.display_name,
             )
         )
-
-    # Membership depends on both parent rows. The mapped models do not expose
-    # ORM relationships, so SQLAlchemy cannot infer an object dependency from
-    # Python references. Flush parent INSERTs first while keeping the same
-    # transaction; a later failure is still fully rolled back by the caller.
-    if plan.create_tenant or plan.create_user:
-        db.flush()
-
     if plan.create_membership:
         db.add(
             Membership(
@@ -118,33 +109,6 @@ def apply_plan(
             )
         )
     db.commit()
-
-
-
-def safe_database_error_details(exc: Exception) -> dict[str, str | None]:
-    """Return only non-sensitive database diagnostics.
-
-    Never returns exception messages, SQL statements, parameters,
-    connection strings, credentials, or provider tokens.
-    """
-    details: dict[str, str | None] = {
-        "error_type": type(exc).__name__,
-        "sqlstate": None,
-        "constraint": None,
-    }
-
-    if isinstance(exc, DBAPIError):
-        original = getattr(exc, "orig", None)
-        sqlstate = getattr(original, "sqlstate", None) or getattr(original, "pgcode", None)
-        diag = getattr(original, "diag", None)
-        constraint = getattr(diag, "constraint_name", None) if diag is not None else None
-
-        if isinstance(sqlstate, str) and len(sqlstate) <= 10:
-            details["sqlstate"] = sqlstate
-        if isinstance(constraint, str) and len(constraint) <= 128:
-            details["constraint"] = constraint
-
-    return details
 
 
 def main() -> int:
@@ -186,14 +150,16 @@ def main() -> int:
 
         try:
             apply_plan(db, plan)
-        except Exception as exc:
+        except Exception:
             db.rollback()
-            failure = {
-                "status": "FAILED",
-                "write_executed": False,
-                **safe_database_error_details(exc),
-            }
-            print(json.dumps(failure))
+            print(
+                json.dumps(
+                    {
+                        "status": "FAILED",
+                        "write_executed": False,
+                    }
+                )
+            )
             return 4
 
         print(

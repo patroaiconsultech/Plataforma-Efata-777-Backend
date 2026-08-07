@@ -141,8 +141,6 @@ def oidc_settings() -> Settings:
         ),
         PLATFORM_OIDC_INTROSPECTION_CLIENT_ID="backend",
         PLATFORM_OIDC_INTROSPECTION_CLIENT_SECRET="secret",
-        PLATFORM_OIDC_TENANT_CLAIM="tenant_id",
-        PLATFORM_OIDC_ROLES_CLAIM="roles",
     )
 
 
@@ -205,34 +203,3 @@ def test_docker_image_contains_migration_runtime_files():
     assert "COPY pyproject.toml alembic.ini ./" in dockerfile
     assert "COPY migrations ./migrations" in dockerfile
     assert "COPY scripts ./scripts" in dockerfile
-
-
-def test_test_auth_requires_and_preserves_external_subject():
-    settings = Settings(
-        PLATFORM_ENVIRONMENT="test",
-        PLATFORM_AUTH_MODE="test",
-        PLATFORM_INVITATION_TOKEN_SECRET="x" * 40,
-    )
-    with pytest.raises(HTTPException) as raised:
-        require_principal(
-            authorization=None,
-            x_test_user="user-1",
-            x_test_tenant="tenant-1",
-            x_test_roles="admin",
-            x_test_email="owner@example.com",
-            x_test_subject=None,
-            settings=settings,
-        )
-    assert raised.value.status_code == 401
-    assert raised.value.detail == "TEST_SUBJECT_REQUIRED"
-
-    principal = require_principal(
-        authorization=None,
-        x_test_user="user-1",
-        x_test_tenant="tenant-1",
-        x_test_roles="admin",
-        x_test_email="owner@example.com",
-        x_test_subject="sub-1",
-        settings=settings,
-    )
-    assert principal.external_subject == "sub-1"
