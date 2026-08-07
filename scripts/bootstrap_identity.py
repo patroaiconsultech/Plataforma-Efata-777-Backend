@@ -100,6 +100,14 @@ def apply_plan(
                 display_name=plan.display_name,
             )
         )
+
+    # Membership depends on both parent rows. The mapped models do not expose
+    # ORM relationships, so SQLAlchemy cannot infer an object dependency from
+    # Python references. Flush parent INSERTs first while keeping the same
+    # transaction; a later failure is still fully rolled back by the caller.
+    if plan.create_tenant or plan.create_user:
+        db.flush()
+
     if plan.create_membership:
         db.add(
             Membership(
