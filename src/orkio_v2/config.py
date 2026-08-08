@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     artifact_storage_path: str = Field("./data/artifacts", alias="PLATFORM_ARTIFACT_STORAGE_PATH")
     max_upload_bytes: int = Field(10_000_000, alias="PLATFORM_MAX_UPLOAD_BYTES")
 
+    document_context_enabled: bool = Field(True, alias="PLATFORM_DOCUMENT_CONTEXT_ENABLED")
+    document_context_max_files: int = Field(6, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_FILES")
+    document_context_max_chars: int = Field(48_000, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_CHARS")
+    document_context_max_chars_per_file: int = Field(20_000, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_CHARS_PER_FILE")
+    document_context_max_pdf_pages: int = Field(40, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_PDF_PAGES")
+
     github_enabled: bool = Field(False, alias="PLATFORM_GITHUB_INTEGRATION_ENABLED")
     github_read_only: bool = Field(True, alias="PLATFORM_GITHUB_READ_ONLY")
     github_allowed_repositories: str = Field("", alias="PLATFORM_GITHUB_ALLOWED_REPOSITORIES")

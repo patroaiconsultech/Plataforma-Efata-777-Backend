@@ -12,6 +12,7 @@ from .schemas import *
 from .services.invitations import create_invitation, accept_invitation
 from .services.identity import require_provisioned_principal, require_known_principal, assert_provisioned
 from .services import llm
+from .services.document_context import document_context_message
 from .agents.registry import AgentNotFound, list_agents
 from .services.execution_router import resolve_direct_execution
 
@@ -39,10 +40,25 @@ def thread_access(db: Session, thread_id: str, p: Principal) -> tuple[Thread, Th
     if not member: raise HTTPException(403, "THREAD_ACCESS_DENIED")
     return thread, member
 
-def _history(db: Session, thread_id: str, tenant_id: str, limit: int = 40) -> list[dict]:
+def _history(
+    db: Session,
+    thread_id: str,
+    tenant_id: str,
+    settings: Settings,
+    limit: int = 40,
+) -> list[dict]:
     rows=db.scalars(select(Message).where(Message.thread_id==thread_id,Message.tenant_id==tenant_id)
                     .order_by(Message.created_at.desc()).limit(limit)).all()
-    return [{"role":"assistant" if m.author_type=="agent" else "user","content":m.content} for m in reversed(rows)]
+    history=[{"role":"assistant" if m.author_type=="agent" else "user","content":m.content} for m in reversed(rows)]
+    context=document_context_message(
+        db,
+        settings=settings,
+        tenant_id=tenant_id,
+        thread_id=thread_id,
+    )
+    if context:
+        history.insert(0, context)
+    return history
 
 @router.get("/health")
 def health(settings: Settings=Depends(get_settings)):
@@ -183,7 +199,7 @@ async def send_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(r
 
     user=Message(tenant_id=p.tenant_id,thread_id=thread_id,author_type="user",author_id=p.user_id,content=payload.content)
     db.add(user); db.commit()
-    history=_history(db,thread_id,p.tenant_id)
+    history=_history(db,thread_id,p.tenant_id,settings)
 
     try:
         answer=await llm.generate(settings,execution.resolved_target,history)
@@ -226,7 +242,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
     if configured:
         db.add(Message(tenant_id=tenant_id,thread_id=thread_id,author_type="user",author_id=user_id,content=payload.content))
         db.commit()
-        history=_history(db,thread_id,tenant_id)
+        history=_history(db,thread_id,tenant_id,settings)
     else:
         history=[]
 
