@@ -13,6 +13,7 @@ from .services.invitations import create_invitation, accept_invitation
 from .services.identity import require_provisioned_principal, require_known_principal, assert_provisioned
 from .services import llm
 from .services.document_context import document_context_message
+from .services.attachment_service import AttachmentIdentityConflict, persist_attachment
 from .agents.registry import AgentNotFound, list_agents
 from .services.execution_router import resolve_direct_execution
 
@@ -339,11 +340,27 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
     root=Path(settings.artifact_storage_path).resolve()
     target=(root/key).resolve()
     if not str(target).startswith(str(root)+"/"): raise HTTPException(400,"STORAGE_PATH_INVALID")
-    target.parent.mkdir(parents=True,exist_ok=True); target.write_bytes(data)
-    row=Attachment(tenant_id=p.tenant_id,thread_id=thread_id,uploaded_by=p.user_id,filename=safe,
-                   mime_type=file.content_type,size_bytes=len(data),sha256=digest,storage_key=key)
-    db.add(row); db.commit()
-    return {"id":row.id,"filename":safe,"sha256":digest}
+    try:
+        result=persist_attachment(
+            db,
+            tenant_id=p.tenant_id,
+            thread_id=thread_id,
+            uploaded_by=p.user_id,
+            filename=safe,
+            mime_type=file.content_type,
+            data=data,
+            sha256=digest,
+            storage_key=key,
+            target=target,
+        )
+    except AttachmentIdentityConflict as exc:
+        raise HTTPException(409,"ATTACHMENT_IDENTITY_CONFLICT") from exc
+    return {
+        "id":result.attachment.id,
+        "filename":result.attachment.filename,
+        "sha256":result.attachment.sha256,
+        "reused":result.reused,
+    }
 
 @router.post("/evolution/proposals")
 def create_proposal(payload:EvolutionProposalCreate,p:Principal=Depends(require_admin),db:Session=Depends(get_db)):
