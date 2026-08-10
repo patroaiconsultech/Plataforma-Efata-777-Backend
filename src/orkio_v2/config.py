@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     github_enabled: bool = Field(False, alias="PLATFORM_GITHUB_INTEGRATION_ENABLED")
     github_read_only: bool = Field(True, alias="PLATFORM_GITHUB_READ_ONLY")
     github_allowed_repositories: str = Field("", alias="PLATFORM_GITHUB_ALLOWED_REPOSITORIES")
+    github_api_base: str = Field("https://api.github.com", alias="PLATFORM_GITHUB_API_BASE")
+    github_read_token: str = Field("", alias="PLATFORM_GITHUB_READ_TOKEN")
+    github_http_timeout_seconds: float = Field(5.0, alias="PLATFORM_GITHUB_HTTP_TIMEOUT_SECONDS")
+    github_max_file_bytes: int = Field(250000, alias="PLATFORM_GITHUB_MAX_FILE_BYTES")
+    github_max_tree_entries: int = Field(5000, alias="PLATFORM_GITHUB_MAX_TREE_ENTRIES")
+    github_snapshot_max_files: int = Field(8, alias="PLATFORM_GITHUB_SNAPSHOT_MAX_FILES")
+    github_snapshot_max_chars: int = Field(60000, alias="PLATFORM_GITHUB_SNAPSHOT_MAX_CHARS")
 
     voice_enabled: bool = Field(False, alias="PLATFORM_REALTIME_VOICE_ENABLED")
     voice_provider: str = Field("disabled", alias="PLATFORM_VOICE_PROVIDER")
@@ -109,6 +116,18 @@ class Settings(BaseSettings):
                 raise ValueError("OIDC_CONFIGURATION_INCOMPLETE")
         if not self.github_read_only:
             raise ValueError("GITHUB_WRITE_MODE_FORBIDDEN")
+        if self.github_enabled and not self.github_allowed_repositories.strip():
+            raise ValueError("GITHUB_ALLOWED_REPOSITORIES_REQUIRED")
+        if self.github_enabled and self.github_api_base.rstrip("/") != "https://api.github.com":
+            raise ValueError("GITHUB_API_BASE_FORBIDDEN")
+        if (
+            self.github_http_timeout_seconds <= 0
+            or self.github_max_file_bytes <= 0
+            or self.github_max_tree_entries <= 0
+            or self.github_snapshot_max_files <= 0
+            or self.github_snapshot_max_chars <= 0
+        ):
+            raise ValueError("GITHUB_READ_LIMITS_INVALID")
         if self.voice_enabled and self.voice_provider == "disabled":
             raise ValueError("VOICE_PROVIDER_REQUIRED")
         if self.llm_provider_failover_enabled:

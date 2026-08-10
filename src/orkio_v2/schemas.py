@@ -34,3 +34,8 @@ class EvolutionProposalCreate(BaseModel):
     risk_assessment: dict
     rollback_plan: dict
     smoke_plan: dict
+
+
+class GitHubSnapshotRequest(BaseModel):
+    repository: str = Field(min_length=3, max_length=240)
+    paths: list[str] = Field(default_factory=list, max_length=20)

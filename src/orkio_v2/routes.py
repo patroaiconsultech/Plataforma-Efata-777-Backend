@@ -1,7 +1,7 @@
 import asyncio, hashlib, json
 from pathlib import Path, PurePosixPath
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from sqlalchemy import select, text, func
 from sqlalchemy.orm import Session
 from .auth import Principal, require_principal
@@ -34,6 +34,21 @@ from .runtime.events import RuntimeEvent, RuntimeEventType, validate_runtime_seq
 from .services.execution_correlation import ExecutionCorrelation
 from .services.audit_observability import ExecutionObserver
 from .services.agent_availability import availability_for, readiness_probe_for_id
+from .services.artifact_generation import (
+    ArtifactGenerationError,
+    artifact_generation_system_message,
+    artifact_payload,
+    default_filename,
+    detect_artifact_intent,
+    persist_validated_artifact,
+    render_and_validate,
+)
+from .services.github_integration import (
+    GitHubIntegrationError,
+    allowed_repositories,
+    github_context_messages,
+    repository_snapshot,
+)
 
 router=APIRouter(prefix="/api/v2")
 
@@ -99,6 +114,7 @@ def _history(
     tenant_id: str,
     settings: Settings,
     limit: int = 40,
+    extra_system_messages: list[dict[str, str]] | None = None,
 ) -> list[dict]:
     rows=db.scalars(select(Message).where(Message.thread_id==thread_id,Message.tenant_id==tenant_id)
                     .order_by(Message.created_at.desc()).limit(limit)).all()
@@ -115,7 +131,7 @@ def _history(
         tenant_id=tenant_id,
         thread_id=thread_id,
     )
-    system_messages=[]
+    system_messages=list(extra_system_messages or [])
     if knowledge:
         system_messages.append(knowledge)
     if context:
@@ -209,6 +225,54 @@ def governance(settings: Settings=Depends(get_settings)):
       "llm_configured": bool((settings.openai_api_key or "").strip()),
     }
 
+@router.get("/integrations/github/repositories")
+def github_repositories(
+    p: Principal = Depends(require_provisioned_admin),
+    settings: Settings = Depends(get_settings),
+):
+    if not settings.github_enabled:
+        raise HTTPException(403, "GITHUB_INTEGRATION_DISABLED")
+    return {
+        "repositories": list(allowed_repositories(settings)),
+        "read_only": True,
+        "proposal_only": True,
+        "write_executed": False,
+    }
+
+
+@router.post("/integrations/github/snapshot")
+async def github_snapshot(
+    payload: GitHubSnapshotRequest,
+    p: Principal = Depends(require_provisioned_admin),
+    settings: Settings = Depends(get_settings),
+):
+    try:
+        snapshot = await repository_snapshot(
+            settings,
+            payload.repository,
+            requested_paths=payload.paths,
+        )
+    except GitHubIntegrationError as exc:
+        raise HTTPException(
+            status_code=422 if "PATH" in (exc.args[0] if exc.args else exc.code) else 503,
+            detail={"code": exc.args[0] if exc.args else exc.code},
+        ) from exc
+    return {
+        "provenance": snapshot.provenance(),
+        "tree_paths": list(snapshot.tree_paths),
+        "files": [
+            {
+                "path": item.path,
+                "sha256": item.sha256,
+                "github_blob_sha": item.github_blob_sha,
+                "size": item.size,
+                "text": item.text,
+            }
+            for item in snapshot.files
+        ],
+    }
+
+
 @router.post("/threads")
 def create_thread(payload: ThreadCreate, p: Principal=Depends(require_provisioned_principal), db: Session=Depends(get_db)):
     thread=Thread(tenant_id=p.tenant_id,title=payload.title,created_by=p.user_id)
@@ -281,7 +345,18 @@ async def send_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(r
 
     user=Message(tenant_id=p.tenant_id,thread_id=thread_id,author_type="user",author_id=p.user_id,content=payload.content)
     db.add(user); db.commit()
-    history=_history(db,thread_id,p.tenant_id,settings)
+    github_messages = await github_context_messages(
+        settings,
+        message=payload.content,
+        is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
+    )
+    history=_history(
+        db,
+        thread_id,
+        p.tenant_id,
+        settings,
+        extra_system_messages=github_messages,
+    )
 
     try:
         answer=await llm.generate(settings,execution.resolved_target,history)
@@ -351,11 +426,28 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
     agent=execution.resolved_target
     tenant_id=p.tenant_id
     user_id=p.user_id
+    artifact_intent=detect_artifact_intent(payload.content)
+    artifact_allowed=bool(
+        artifact_intent
+        and settings.artifacts_enabled
+        and member.can_generate_artifacts
+    )
 
     if configured:
         db.add(Message(tenant_id=tenant_id,thread_id=thread_id,author_type="user",author_id=user_id,content=payload.content))
         db.commit()
-        history=_history(db,thread_id,tenant_id,settings)
+        github_messages = await github_context_messages(
+            settings,
+            message=payload.content,
+            is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
+        )
+        history=_history(
+            db,
+            thread_id,
+            tenant_id,
+            settings,
+            extra_system_messages=github_messages,
+        )
     else:
         history=[]
 
@@ -440,10 +532,50 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
             yield sse_event(terminal(RuntimeEventType.DONE,status="failed"))
             return
 
+        generated_artifact=None
+        if artifact_allowed and artifact_intent is not None:
+            try:
+                validated=render_and_validate(
+                    intent=artifact_intent,
+                    content=answer,
+                    filename=default_filename(
+                        artifact_intent,
+                        agent_name=turn.display_agent_name,
+                    ),
+                )
+                generated_artifact=persist_validated_artifact(
+                    db,
+                    settings=settings,
+                    tenant_id=tenant_id,
+                    thread_id=thread_id,
+                    created_by=user_id,
+                    validated=validated,
+                    source_message_sha256=hashlib.sha256(payload.content.encode("utf-8")).hexdigest(),
+                    source_response_message_id=message_id,
+                    agent_id=turn.turn_owner_agent_id,
+                )
+            except ArtifactGenerationError as exc:
+                observer.fail(getattr(exc, "code", "ARTIFACT_GENERATION_FAILED"))
+                yield sse_event(event(
+                    RuntimeEventType.ERROR,
+                    code=getattr(exc, "code", "ARTIFACT_GENERATION_FAILED"),
+                    message="Falha ao gerar ou validar o artefato solicitado.",
+                ))
+                yield sse_event(terminal(RuntimeEventType.DONE,status="failed",message_id=message_id))
+                return
+            except Exception:
+                observer.fail("ARTIFACT_GENERATION_FAILED")
+                yield sse_event(event(
+                    RuntimeEventType.ERROR,
+                    code="ARTIFACT_GENERATION_FAILED",
+                    message="Falha ao persistir o artefato solicitado.",
+                ))
+                yield sse_event(terminal(RuntimeEventType.DONE,status="failed",message_id=message_id))
+                return
+
         observer.persisted(message_id=message_id)
         observer.complete()
-        yield sse_event(terminal(
-            RuntimeEventType.DONE,
+        done_payload=dict(
             status="completed",
             message_id=message_id,
             agent_id=envelope.agent_id,
@@ -453,7 +585,10 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
             display_agent_id=turn.display_agent_id,
             ownership_locked=execution.ownership_locked,
             response=envelope_payload(envelope),
-        ))
+        )
+        if generated_artifact is not None:
+            done_payload["artifact"]=artifact_payload(generated_artifact)
+        yield sse_event(terminal(RuntimeEventType.DONE, **done_payload))
 
     return StreamingResponse(events(),media_type="text/event-stream",
                              headers={"Cache-Control":"no-store","X-Accel-Buffering":"no"})
@@ -521,6 +656,61 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
         "sha256":result.attachment.sha256,
         "reused":result.reused,
     }
+
+@router.get("/threads/{thread_id}/artifacts")
+def list_artifacts(
+    thread_id:str,
+    p:Principal=Depends(require_provisioned_principal),
+    db:Session=Depends(get_db),
+):
+    _,member=thread_access(db,thread_id,p)
+    if not member.can_download_artifacts:
+        raise HTTPException(403,"ARTIFACT_DOWNLOAD_PERMISSION_REQUIRED")
+    rows=db.scalars(
+        select(Artifact).where(
+            Artifact.thread_id==thread_id,
+            Artifact.tenant_id==p.tenant_id,
+        ).order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    ).all()
+    return [{
+        "id":row.id,
+        "filename":row.filename,
+        "mime_type":row.mime_type,
+        "sha256":row.sha256,
+        "version":row.version,
+        "created_at":row.created_at.isoformat() if row.created_at else None,
+        "download_path":f"/api/v2/artifacts/{row.id}/download",
+    } for row in rows]
+
+
+@router.get("/artifacts/{artifact_id}/download")
+def download_artifact(
+    artifact_id:str,
+    p:Principal=Depends(require_provisioned_principal),
+    settings:Settings=Depends(get_settings),
+    db:Session=Depends(get_db),
+):
+    row=db.get(Artifact,artifact_id)
+    if not row or row.tenant_id != p.tenant_id:
+        raise HTTPException(404,"ARTIFACT_NOT_FOUND")
+    _,member=thread_access(db,row.thread_id,p)
+    if not member.can_download_artifacts:
+        raise HTTPException(403,"ARTIFACT_DOWNLOAD_PERMISSION_REQUIRED")
+    root=Path(settings.artifact_storage_path).resolve()
+    target=(root/row.storage_key).resolve()
+    if not str(target).startswith(str(root)+"/"):
+        raise HTTPException(400,"STORAGE_PATH_INVALID")
+    if not target.is_file():
+        raise HTTPException(404,"ARTIFACT_FILE_NOT_FOUND")
+    if hashlib.sha256(target.read_bytes()).hexdigest() != row.sha256:
+        raise HTTPException(409,"ARTIFACT_INTEGRITY_MISMATCH")
+    return FileResponse(
+        path=target,
+        media_type=row.mime_type,
+        filename=row.filename,
+        headers={"Cache-Control":"private, no-store"},
+    )
+
 
 @router.post("/evolution/proposals")
 def create_proposal(payload:EvolutionProposalCreate,p:Principal=Depends(require_provisioned_admin),db:Session=Depends(get_db)):
