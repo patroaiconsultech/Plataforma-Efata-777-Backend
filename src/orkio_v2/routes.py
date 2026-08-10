@@ -18,6 +18,7 @@ from .services.identity import (
 )
 from .services import llm
 from .services.document_context import document_context_message
+from .services.platform_knowledge import platform_knowledge_message
 from .services.attachment_service import AttachmentIdentityConflict, persist_attachment
 from .agents.registry import AgentNotFound, list_agents
 from .services.execution_router import resolve_direct_target_decision
@@ -101,16 +102,25 @@ def _history(
 ) -> list[dict]:
     rows=db.scalars(select(Message).where(Message.thread_id==thread_id,Message.tenant_id==tenant_id)
                     .order_by(Message.created_at.desc()).limit(limit)).all()
-    history=[history_item(m) for m in reversed(rows)]
+    ordered=list(reversed(rows))
+    history=[history_item(m) for m in ordered]
+    latest_user_content=next(
+        (str(m.content or "") for m in reversed(ordered) if m.author_type=="user"),
+        "",
+    )
+    knowledge=platform_knowledge_message(latest_user_content)
     context=document_context_message(
         db,
         settings=settings,
         tenant_id=tenant_id,
         thread_id=thread_id,
     )
+    system_messages=[]
+    if knowledge:
+        system_messages.append(knowledge)
     if context:
-        history.insert(0, context)
-    return history
+        system_messages.append(context)
+    return system_messages + history
 
 @router.get("/health")
 def health(settings: Settings=Depends(get_settings)):
