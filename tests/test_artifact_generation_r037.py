@@ -74,3 +74,14 @@ def test_stream_done_includes_artifact_only_after_generation():
     assert 'done_payload["artifact"]=artifact_payload(generated_artifact)' in text
     assert "persist_validated_artifact(" in text
     assert "source_message_sha256=hashlib.sha256(payload.content.encode" in text
+
+
+def test_stream_injects_artifact_capability_message_when_allowed():
+    from pathlib import Path
+    routes = Path(__file__).parents[1] / "src/orkio_v2/routes.py"
+    text = routes.read_text(encoding="utf-8")
+    assert "runtime_system_messages = list(github_messages)" in text
+    assert "if artifact_allowed and artifact_intent is not None:" in text
+    assert "runtime_system_messages.append(" in text
+    assert "artifact_generation_system_message(artifact_intent)" in text
+    assert "extra_system_messages=runtime_system_messages" in text

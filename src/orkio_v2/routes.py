@@ -441,12 +441,17 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
             message=payload.content,
             is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
         )
+        runtime_system_messages = list(github_messages)
+        if artifact_allowed and artifact_intent is not None:
+            runtime_system_messages.append(
+                artifact_generation_system_message(artifact_intent)
+            )
         history=_history(
             db,
             thread_id,
             tenant_id,
             settings,
-            extra_system_messages=github_messages,
+            extra_system_messages=runtime_system_messages,
         )
     else:
         history=[]
