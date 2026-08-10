@@ -1,4 +1,4 @@
-import asyncio, hashlib, json
+import asyncio, hashlib, json, logging
 from pathlib import Path, PurePosixPath
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse, FileResponse
@@ -51,6 +51,7 @@ from .services.github_integration import (
 )
 
 router=APIRouter(prefix="/api/v2")
+artifact_gate_logger=logging.getLogger("orkio.artifact_gate")
 
 @router.get("/agents")
 def agents_catalog(
@@ -432,6 +433,27 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
         and settings.artifacts_enabled
         and member.can_generate_artifacts
     )
+    if artifact_intent is not None:
+        artifact_gate_logger.info(
+            "ARTIFACT_GATE %s",
+            json.dumps(
+                {
+                    "event": "artifact_gate_evaluated",
+                    "execution_id": turn.execution_id,
+                    "thread_id": thread_id,
+                    "requested_agent": payload.agent,
+                    "resolved_agent": turn.resolved_agent_id,
+                    "requested_format": artifact_intent.requested_format,
+                    "artifacts_enabled": bool(settings.artifacts_enabled),
+                    "can_generate_artifacts": bool(member.can_generate_artifacts),
+                    "artifact_allowed": artifact_allowed,
+                    "environment": settings.environment,
+                    "release_sha": settings.release_sha,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        )
 
     if configured:
         db.add(Message(tenant_id=tenant_id,thread_id=thread_id,author_type="user",author_id=user_id,content=payload.content))

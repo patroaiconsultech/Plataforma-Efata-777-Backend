@@ -85,3 +85,20 @@ def test_stream_injects_artifact_capability_message_when_allowed():
     assert "runtime_system_messages.append(" in text
     assert "artifact_generation_system_message(artifact_intent)" in text
     assert "extra_system_messages=runtime_system_messages" in text
+
+
+def test_stream_logs_safe_artifact_gate_diagnostics_without_prompt_or_secrets():
+    from pathlib import Path
+    routes = Path(__file__).parents[1] / "src/orkio_v2/routes.py"
+    text = routes.read_text(encoding="utf-8")
+    assert 'artifact_gate_logger=logging.getLogger("orkio.artifact_gate")' in text
+    assert '"event": "artifact_gate_evaluated"' in text
+    assert '"artifacts_enabled": bool(settings.artifacts_enabled)' in text
+    assert '"can_generate_artifacts": bool(member.can_generate_artifacts)' in text
+    assert '"artifact_allowed": artifact_allowed' in text
+    assert '"requested_format": artifact_intent.requested_format' in text
+    assert '"release_sha": settings.release_sha' in text
+    block = text[text.index('"event": "artifact_gate_evaluated"'):text.index("if configured:", text.index('"event": "artifact_gate_evaluated"'))]
+    assert "payload.content" not in block
+    assert "token" not in block.lower()
+    assert "secret" not in block.lower()
