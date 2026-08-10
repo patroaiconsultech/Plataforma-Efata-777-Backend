@@ -1,9 +1,8 @@
-"""Validação de provisionamento de identidade.
+"""Validação e autorização canônica de identidade provisionada.
 
-Um token válido não significa que User, Tenant e Membership existam no
-banco. Este módulo torna essa distinção explícita e fail-closed: nunca
-cria tenant, usuário ou membership automaticamente a partir de claim
-não confiável.
+Um token válido autentica uma identidade externa. Privilégios efetivos,
+porém, vêm da Membership ativa no banco ORKIO. Claims de role não podem
+elevar privilégio nem atravessar tenants.
 """
 
 from __future__ import annotations
@@ -16,18 +15,16 @@ from ..auth import Principal, require_principal
 from ..config import Settings, get_settings
 from ..database import get_db
 from ..models import Membership, Tenant, User
+from .authorization import ProvisionedAuthorizationError, resolve_provisioned_roles
 
 
 def assert_provisioned(db: Session, principal: Principal) -> None:
-    """Garante que o principal existe de fato no banco.
-
-    Levanta 403 PRINCIPAL_NOT_PROVISIONED quando o tenant, o usuário ou o
-    vínculo ativo entre ambos não existir. Não revela qual dos três está
-    ausente, para não servir como oráculo de enumeração.
-    """
-    if db.get(Tenant, principal.tenant_id) is None:
+    """Garante tenant, usuário, subject e membership ativa."""
+    tenant = db.get(Tenant, principal.tenant_id)
+    user = db.get(User, principal.user_id)
+    if tenant is None or user is None:
         raise HTTPException(403, "PRINCIPAL_NOT_PROVISIONED")
-    if db.get(User, principal.user_id) is None:
+    if not principal.external_subject or user.external_subject != principal.external_subject:
         raise HTTPException(403, "PRINCIPAL_NOT_PROVISIONED")
     membership = db.scalar(
         select(Membership).where(
@@ -41,20 +38,43 @@ def assert_provisioned(db: Session, principal: Principal) -> None:
 
 
 def assert_identity_known(db: Session, principal: Principal) -> None:
-    """Garante que o tenant e o usuário existem, sem exigir membership.
+    """Garante tenant, usuário e subject conhecido, sem exigir membership.
 
-    Usado exclusivamente pelo aceite de convite. Estabelecer o vínculo com
-    o tenant é justamente a função daquele endpoint, então exigir
-    membership prévio tornaria o fluxo de convite externo impossível.
-
-    A permissão não vem de claim não confiável: vem de um token de convite
-    assinado, emitido por um participante autorizado e validado à parte.
-    Tenant e usuário, porém, continuam tendo de existir previamente.
+    Usado exclusivamente pelo aceite de convite: estabelecer o vínculo com
+    a thread é justamente a finalidade do endpoint. A identidade externa,
+    porém, precisa corresponder ao User existente.
     """
-    if db.get(Tenant, principal.tenant_id) is None:
+    tenant = db.get(Tenant, principal.tenant_id)
+    user = db.get(User, principal.user_id)
+    if tenant is None or user is None:
         raise HTTPException(403, "PRINCIPAL_NOT_PROVISIONED")
-    if db.get(User, principal.user_id) is None:
+    if not principal.external_subject or user.external_subject != principal.external_subject:
         raise HTTPException(403, "PRINCIPAL_NOT_PROVISIONED")
+
+
+def _canonicalize_provisioned_principal(
+    db: Session,
+    principal: Principal,
+    settings: Settings,
+) -> Principal:
+    try:
+        roles = resolve_provisioned_roles(
+            db,
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+            external_subject=principal.external_subject,
+            settings=settings,
+        )
+    except ProvisionedAuthorizationError as exc:
+        raise HTTPException(403, exc.code) from exc
+
+    return Principal(
+        user_id=principal.user_id,
+        tenant_id=principal.tenant_id,
+        roles=roles,
+        email=principal.email,
+        external_subject=principal.external_subject,
+    )
 
 
 def require_provisioned_principal(
@@ -62,12 +82,16 @@ def require_provisioned_principal(
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> Principal:
-    """Dependência que exige principal autenticado e provisionado.
+    """Autentica externamente e deriva autorização efetiva do banco."""
+    return _canonicalize_provisioned_principal(db, principal, settings)
 
-    No modo de teste o provisionamento continua sendo exigido, para que a
-    suíte exercite o mesmo caminho de produção.
-    """
-    assert_provisioned(db, principal)
+
+def require_provisioned_admin(
+    principal: Principal = Depends(require_provisioned_principal),
+) -> Principal:
+    """Exige admin derivado da membership canônica, nunca de claim/header."""
+    if not {"admin", "orkio_admin"}.intersection(principal.roles):
+        raise HTTPException(403, "ADMIN_ROLE_REQUIRED")
     return principal
 
 
@@ -75,6 +99,6 @@ def require_known_principal(
     principal: Principal = Depends(require_principal),
     db: Session = Depends(get_db),
 ) -> Principal:
-    """Dependência para o aceite de convite: identidade conhecida."""
+    """Dependência para aceite de convite: identidade conhecida e subject fiel."""
     assert_identity_known(db, principal)
     return principal

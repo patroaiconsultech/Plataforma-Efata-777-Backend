@@ -76,7 +76,7 @@ def test_message_rejects_unregistered_client_agent(client, monkeypatch):
         headers=headers(),
     )
     assert response.status_code == 404
-    assert response.json()["detail"] == "AGENT_NOT_FOUND"
+    assert response.json()["detail"] == {"code": "TARGET_NOT_FOUND"}
 
 
 def test_stream_rejects_unregistered_client_agent(client, monkeypatch):
@@ -98,7 +98,7 @@ def test_stream_rejects_unregistered_client_agent(client, monkeypatch):
         headers=headers(),
     )
     assert response.status_code == 404
-    assert response.json()["detail"] == "AGENT_NOT_FOUND"
+    assert response.json()["detail"] == {"code": "TARGET_NOT_FOUND"}
 
 
 class FakeIntrospectionResponse:

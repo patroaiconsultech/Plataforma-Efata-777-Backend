@@ -3,6 +3,9 @@ import os
 # Sem isto, uma OPENAI_API_KEY presente no host faria os testes de
 # fail-closed exercitarem a chamada real ao provedor de LLM.
 os.environ.pop("OPENAI_API_KEY", None)
+os.environ.pop("ANTHROPIC_API_KEY", None)
+os.environ.pop("GEMINI_API_KEY", None)
+os.environ.pop("GOOGLE_API_KEY", None)
 os.environ.update({
  "PLATFORM_ENVIRONMENT":"test","PLATFORM_AUTH_MODE":"test",
  "PLATFORM_INVITATION_TOKEN_SECRET":"x"*40,"DATABASE_URL":"sqlite+pysqlite:///:memory:"
@@ -44,9 +47,17 @@ def client():
         db.add(Membership(tenant_id="tenant-1",user_id="user-1",role="admin"))
         db.commit()
     return TestClient(app)
-def headers(user="user-1",roles="admin",tenant="tenant-1"):
+def headers(user="user-1",roles="admin",tenant="tenant-1",subject=None):
     email = "guest@example.com" if user == "user-2" else "owner@example.com"
-    return {"X-Test-User":user,"X-Test-Tenant":tenant,"X-Test-Roles":roles,"X-Test-Email":email}
+    if subject is None:
+        subject = user.replace("user-", "sub-", 1)
+    return {
+        "X-Test-User": user,
+        "X-Test-Tenant": tenant,
+        "X-Test-Roles": roles,
+        "X-Test-Email": email,
+        "X-Test-Subject": subject,
+    }
 
 
 @pytest.fixture()

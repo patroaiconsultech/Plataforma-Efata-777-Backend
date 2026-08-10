@@ -84,6 +84,22 @@ def build_plan(db: Session, args: argparse.Namespace) -> BootstrapPlan:
     )
 
 
+def safe_database_error_details(exc: Exception) -> dict[str, str | None]:
+    """Extrai somente metadados seguros; nunca SQL, params ou mensagem."""
+    original = getattr(exc, "orig", None)
+    sqlstate = (
+        getattr(original, "sqlstate", None)
+        or getattr(original, "pgcode", None)
+    )
+    diag = getattr(original, "diag", None)
+    constraint = getattr(diag, "constraint_name", None) if diag is not None else None
+    return {
+        "error_type": type(exc).__name__,
+        "sqlstate": str(sqlstate) if sqlstate else None,
+        "constraint": str(constraint) if constraint else None,
+    }
+
+
 def apply_plan(
     db: Session,
     plan: BootstrapPlan,
@@ -99,6 +115,12 @@ def apply_plan(
                 display_name=plan.display_name,
             )
         )
+
+    # Tenant e User são pais FK de Membership. Flush mantém tudo na mesma
+    # transação, mas garante a ordem de INSERT antes do filho.
+    if plan.create_tenant or plan.create_user:
+        db.flush()
+
     if plan.create_membership:
         db.add(
             Membership(
