@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 import zipfile
 from dataclasses import dataclass
@@ -50,6 +51,8 @@ _TEXT_MIME_TYPES = {
 }
 _PDF_MIME = "application/pdf"
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+document_context_logger = logging.getLogger("uvicorn.error")
 
 
 def _safe_storage_path(settings: Settings, storage_key: str) -> Path:
@@ -209,11 +212,61 @@ def load_thread_documents(
                     text=text,
                 )
             )
+            document_context_logger.info(
+                "DOCUMENT_CONTEXT_EXTRACTED %s",
+                json.dumps(
+                    {
+                        "event": "document_context_extracted",
+                        "tenant_id": tenant_id,
+                        "thread_id": thread_id,
+                        "attachment_id": attachment.id,
+                        "filename": attachment.filename,
+                        "mime_type": attachment.mime_type,
+                        "sha256": attachment.sha256,
+                        "chars": len(text),
+                    },
+                    sort_keys=True,
+                ),
+            )
             remaining -= len(text)
         except FileNotFoundError:
-            errors.append({"attachment_id": attachment.id, "code": "DOCUMENT_STORAGE_MISSING"})
+            code = "DOCUMENT_STORAGE_MISSING"
+            errors.append({"attachment_id": attachment.id, "code": code})
+            document_context_logger.warning(
+                "DOCUMENT_CONTEXT_FAILED %s",
+                json.dumps(
+                    {
+                        "event": "document_context_failed",
+                        "tenant_id": tenant_id,
+                        "thread_id": thread_id,
+                        "attachment_id": attachment.id,
+                        "filename": attachment.filename,
+                        "mime_type": attachment.mime_type,
+                        "sha256": attachment.sha256,
+                        "error_code": code,
+                    },
+                    sort_keys=True,
+                ),
+            )
         except DocumentContextError as exc:
-            errors.append({"attachment_id": attachment.id, "code": str(exc) or exc.code})
+            code = str(exc) or exc.code
+            errors.append({"attachment_id": attachment.id, "code": code})
+            document_context_logger.warning(
+                "DOCUMENT_CONTEXT_FAILED %s",
+                json.dumps(
+                    {
+                        "event": "document_context_failed",
+                        "tenant_id": tenant_id,
+                        "thread_id": thread_id,
+                        "attachment_id": attachment.id,
+                        "filename": attachment.filename,
+                        "mime_type": attachment.mime_type,
+                        "sha256": attachment.sha256,
+                        "error_code": code,
+                    },
+                    sort_keys=True,
+                ),
+            )
 
     return documents, errors
 

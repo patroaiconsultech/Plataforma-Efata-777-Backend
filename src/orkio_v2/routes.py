@@ -18,6 +18,7 @@ from .services.identity import (
 )
 from .services import llm
 from .services.document_context import document_context_message
+from .services.artifact_context import artifact_context_message
 from .services.platform_knowledge import platform_knowledge_message
 from .services.attachment_service import AttachmentIdentityConflict, persist_attachment
 from .agents.registry import AgentNotFound, list_agents
@@ -145,6 +146,13 @@ def _history(
         system_messages.append(knowledge)
     if context:
         system_messages.append(context)
+    persisted_artifacts = artifact_context_message(
+        db,
+        tenant_id=tenant_id,
+        thread_id=thread_id,
+    )
+    if persisted_artifacts:
+        system_messages.append(persisted_artifacts)
     return system_messages + history
 
 @router.get("/health")
