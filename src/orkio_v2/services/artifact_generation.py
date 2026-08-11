@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import re
 import uuid
 import zipfile
@@ -18,6 +19,8 @@ from ..models import Artifact
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TXT_MIME = "text/plain"
+
+artifact_runtime_logger = logging.getLogger("uvicorn.error")
 
 _ARTIFACT_INTENT_RE = re.compile(
     r"\b(?:gere|gerar|crie|criar|exporte|exportar|salve|salvar|produza|produzir|create|generate|export|save)\b",
@@ -84,7 +87,9 @@ def artifact_generation_system_message(intent: ArtifactIntent) -> dict[str, str]
         "content": (
             "ARTIFACT CAPABILITY AVAILABLE FOR THIS TURN. "
             f"The runtime will render and persist the final answer as {intent.requested_format.upper()} "
-            "after validation. Produce the complete document body that should be placed in the file. "
+            "after validation. Produce only the complete document body that should be placed in the file. "
+            "Do not narrate execution status. Do not claim that the file is generated, persisted, ready, "
+            "or available for download; only the runtime may confirm those states after persistence. "
             "Do not claim that file generation is unavailable. Do not invent a download URL."
         ),
     }
@@ -294,11 +299,30 @@ def persist_validated_artifact(
                 pass
         raise
 
-    return PersistedArtifact(
+    result = PersistedArtifact(
         artifact=row,
         download_path=f"/api/v2/artifacts/{row.id}/download",
         provenance_path=str(sidecar),
     )
+    artifact_runtime_logger.info(
+        "ARTIFACT_PERSISTED %s",
+        json.dumps(
+            {
+                "event": "artifact_persisted",
+                "artifact_id": row.id,
+                "thread_id": thread_id,
+                "agent_id": agent_id,
+                "filename": row.filename,
+                "mime_type": row.mime_type,
+                "sha256": row.sha256,
+                "renderer": validated.renderer,
+                "download_path": result.download_path,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
+    return result
 
 
 def artifact_payload(result: PersistedArtifact) -> dict[str, object]:

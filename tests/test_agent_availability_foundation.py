@@ -33,12 +33,14 @@ def test_configured_provider_is_not_falsely_promoted_to_ready(monkeypatch):
     assert snap.chat.reason_code == "LLM_PRIMARY_PROVIDER_CONFIGURED_NOT_HEALTHCHECKED"
 
 
-def test_team_realtime_voice_and_tools_fail_closed(monkeypatch):
+def test_team_engine_is_bound_while_realtime_voice_and_tools_remain_fail_closed(monkeypatch):
     settings=get_settings()
     monkeypatch.setattr(settings, "openai_api_key", "test-key", raising=False)
     snap=availability_for_id("chris", settings)
-    assert snap.team.eligible is False
-    assert snap.team.reason_code == "TEAM_ENGINE_NOT_BOUND"
+    assert snap.team.eligible is True
+    assert snap.team.status is AvailabilityStatus.CONFIGURED
+    assert snap.team.reason_code == "TEAM_ENGINE_BOUND_PROVIDER_NOT_HEALTHCHECKED"
+    assert snap.team.status is not AvailabilityStatus.READY
     assert snap.realtime.eligible is False
     assert snap.realtime.reason_code == "REALTIME_AGENT_SESSION_NOT_BOUND"
     assert snap.voice_playback.eligible is False

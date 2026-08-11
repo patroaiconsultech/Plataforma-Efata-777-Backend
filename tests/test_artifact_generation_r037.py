@@ -102,3 +102,28 @@ def test_stream_logs_safe_artifact_gate_diagnostics_without_prompt_or_secrets():
     assert "payload.content" not in block
     assert "token" not in block.lower()
     assert "secret" not in block.lower()
+
+
+def test_artifact_system_message_forbids_premature_success_claims():
+    intent = detect_artifact_intent("gere um resumo em .docx")
+    assert intent is not None
+    msg = artifact_generation_system_message(intent)
+    content = msg["content"]
+    assert "Produce only the complete document body" in content
+    assert "Do not narrate execution status" in content
+    assert "only the runtime may confirm those states after persistence" in content
+    assert "Do not claim that file generation is unavailable" in content
+
+
+def test_artifact_service_emits_post_persistence_runtime_evidence():
+    from pathlib import Path
+    service = Path(__file__).parents[1] / "src/orkio_v2/services/artifact_generation.py"
+    text = service.read_text(encoding="utf-8")
+    assert 'logging.getLogger("uvicorn.error")' in text
+    assert '"ARTIFACT_PERSISTED %s"' in text
+    block = text[text.index('"ARTIFACT_PERSISTED %s"'):text.index("return result", text.index('"ARTIFACT_PERSISTED %s"'))]
+    assert '"artifact_id": row.id' in block
+    assert '"sha256": row.sha256' in block
+    assert '"download_path": result.download_path' in block
+    assert "source_message_sha256" not in block
+    assert "created_by" not in block

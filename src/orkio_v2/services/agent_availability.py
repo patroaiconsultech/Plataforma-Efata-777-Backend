@@ -109,7 +109,18 @@ def availability_for(agent: AgentDefinition, settings: Settings) -> AgentAvailab
         )
 
     chat = _chat(agent, settings)
-    team = _unconfigured("TEAM_ENGINE_NOT_BOUND", "runtime")
+    if chat.eligible:
+        team = CapabilityAvailability(
+            AvailabilityStatus.CONFIGURED,
+            True,
+            "TEAM_ENGINE_BOUND_PROVIDER_NOT_HEALTHCHECKED",
+            "team_runtime",
+        )
+    else:
+        team = _unconfigured(
+            "TEAM_ENGINE_PROVIDER_UNAVAILABLE",
+            "team_runtime",
+        )
     realtime = _unconfigured("REALTIME_AGENT_SESSION_NOT_BOUND", "runtime")
 
     # Global voice enablement/provider configuration is insufficient to prove a

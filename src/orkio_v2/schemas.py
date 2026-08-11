@@ -39,3 +39,11 @@ class EvolutionProposalCreate(BaseModel):
 class GitHubSnapshotRequest(BaseModel):
     repository: str = Field(min_length=3, max_length=240)
     paths: list[str] = Field(default_factory=list, max_length=20)
+
+class PythonExecuteRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=100000)
+
+
+class ExternalReadRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+
