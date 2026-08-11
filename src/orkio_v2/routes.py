@@ -1,102 +1,33 @@
-import asyncio, hashlib, json, logging
+import asyncio, hashlib, json
 from pathlib import Path, PurePosixPath
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, text, func
 from sqlalchemy.orm import Session
-from .auth import Principal, require_principal
+from .auth import Principal, require_principal, require_admin
 from .config import Settings, get_settings
 from .database import Base, get_db, engine
 from .models import *
 from .schemas import *
 from .services.invitations import create_invitation, accept_invitation
-from .services.identity import (
-    require_provisioned_principal,
-    require_provisioned_admin,
-    require_known_principal,
-    assert_provisioned,
-)
+from .services.identity import require_provisioned_principal, require_known_principal, assert_provisioned
 from .services import llm
 from .services.document_context import document_context_message
-from .services.platform_knowledge import platform_knowledge_message
-from .services.attachment_service import AttachmentIdentityConflict, persist_attachment
 from .agents.registry import AgentNotFound, list_agents
-from .services.execution_router import resolve_direct_target_decision
-from .services.target_resolver import TargetAmbiguous, TargetNotFound
-from .services.direct_runtime import (
-    build_turn as build_direct_turn,
-    envelope_payload,
-    history_item,
-    persist_agent_response,
-)
-from .runtime.contracts import RuntimeChannel
-from .runtime.events import RuntimeEvent, RuntimeEventType, validate_runtime_sequence
-from .services.execution_correlation import ExecutionCorrelation
-from .services.audit_observability import ExecutionObserver
-from .services.agent_availability import availability_for, readiness_probe_for_id
-from .services.artifact_generation import (
-    ArtifactGenerationError,
-    artifact_generation_system_message,
-    artifact_payload,
-    default_filename,
-    detect_artifact_intent,
-    persist_validated_artifact,
-    render_and_validate,
-)
-from .services.github_integration import (
-    GitHubIntegrationError,
-    allowed_repositories,
-    github_context_messages,
-    repository_snapshot,
-)
+from .services.execution_router import resolve_direct_execution
 
 router=APIRouter(prefix="/api/v2")
-artifact_gate_logger=logging.getLogger("orkio.artifact_gate")
 
 @router.get("/agents")
-def agents_catalog(
-    p: Principal = Depends(require_provisioned_principal),
-    settings: Settings = Depends(get_settings),
-):
-    return [{
-        "slug": a.slug,
-        "canonical_name": a.canonical_name,
-        "display_name": a.display_name,
-        "role_code": a.role_code,
-        "role_label": a.role_label,
-        "organizational_level": a.organizational_level,
-        "department": a.department,
-        "founder_direct_access": a.founder_direct_access,
-        "localized_names": dict(a.localized_names),
-        "localized_role_labels": dict(a.localized_role_labels),
-        "target_kind": a.target_kind.value,
-        "availability": availability_for(a, settings).to_dict(),
-    } for a in list_agents()]
+def agents_catalog(p:Principal=Depends(require_provisioned_principal)):
+    return [{"slug": a.slug, "display_name": a.display_name, "target_kind": a.target_kind.value}
+            for a in list_agents()]
 
-
-@router.get("/agents/by-id/{agent_id}/readiness")
-async def agent_readiness(
-    agent_id: str,
-    p: Principal = Depends(require_provisioned_principal),
-    settings: Settings = Depends(get_settings),
-):
+def _resolve_execution_or_404(requested_target: str):
     try:
-        probe = await readiness_probe_for_id(agent_id, settings)
+        return resolve_direct_execution(requested_target)
     except AgentNotFound as exc:
         raise HTTPException(404, "AGENT_NOT_FOUND") from exc
-    return probe.to_dict()
-
-
-def _resolve_target_or_404(requested_target: str, settings: Settings):
-    try:
-        return resolve_direct_target_decision(requested_target, settings)
-    except TargetAmbiguous as exc:
-        raise HTTPException(
-            409,
-            detail={"code": exc.code, "candidates": list(exc.candidates)},
-        ) from exc
-    except TargetNotFound as exc:
-        raise HTTPException(404, detail={"code": exc.code}) from exc
 
 INVITE_ALLOWED_ROLES={ThreadRole.owner.value, ThreadRole.moderator.value}
 
@@ -115,29 +46,19 @@ def _history(
     tenant_id: str,
     settings: Settings,
     limit: int = 40,
-    extra_system_messages: list[dict[str, str]] | None = None,
 ) -> list[dict]:
     rows=db.scalars(select(Message).where(Message.thread_id==thread_id,Message.tenant_id==tenant_id)
                     .order_by(Message.created_at.desc()).limit(limit)).all()
-    ordered=list(reversed(rows))
-    history=[history_item(m) for m in ordered]
-    latest_user_content=next(
-        (str(m.content or "") for m in reversed(ordered) if m.author_type=="user"),
-        "",
-    )
-    knowledge=platform_knowledge_message(latest_user_content)
+    history=[{"role":"assistant" if m.author_type=="agent" else "user","content":m.content} for m in reversed(rows)]
     context=document_context_message(
         db,
         settings=settings,
         tenant_id=tenant_id,
         thread_id=thread_id,
     )
-    system_messages=list(extra_system_messages or [])
-    if knowledge:
-        system_messages.append(knowledge)
     if context:
-        system_messages.append(context)
-    return system_messages + history
+        history.insert(0, context)
+    return history
 
 @router.get("/health")
 def health(settings: Settings=Depends(get_settings)):
@@ -226,54 +147,6 @@ def governance(settings: Settings=Depends(get_settings)):
       "llm_configured": bool((settings.openai_api_key or "").strip()),
     }
 
-@router.get("/integrations/github/repositories")
-def github_repositories(
-    p: Principal = Depends(require_provisioned_admin),
-    settings: Settings = Depends(get_settings),
-):
-    if not settings.github_enabled:
-        raise HTTPException(403, "GITHUB_INTEGRATION_DISABLED")
-    return {
-        "repositories": list(allowed_repositories(settings)),
-        "read_only": True,
-        "proposal_only": True,
-        "write_executed": False,
-    }
-
-
-@router.post("/integrations/github/snapshot")
-async def github_snapshot(
-    payload: GitHubSnapshotRequest,
-    p: Principal = Depends(require_provisioned_admin),
-    settings: Settings = Depends(get_settings),
-):
-    try:
-        snapshot = await repository_snapshot(
-            settings,
-            payload.repository,
-            requested_paths=payload.paths,
-        )
-    except GitHubIntegrationError as exc:
-        raise HTTPException(
-            status_code=422 if "PATH" in (exc.args[0] if exc.args else exc.code) else 503,
-            detail={"code": exc.args[0] if exc.args else exc.code},
-        ) from exc
-    return {
-        "provenance": snapshot.provenance(),
-        "tree_paths": list(snapshot.tree_paths),
-        "files": [
-            {
-                "path": item.path,
-                "sha256": item.sha256,
-                "github_blob_sha": item.github_blob_sha,
-                "size": item.size,
-                "text": item.text,
-            }
-            for item in snapshot.files
-        ],
-    }
-
-
 @router.post("/threads")
 def create_thread(payload: ThreadCreate, p: Principal=Depends(require_provisioned_principal), db: Session=Depends(get_db)):
     thread=Thread(tenant_id=p.tenant_id,title=payload.title,created_by=p.user_id)
@@ -311,88 +184,36 @@ def list_threads(p: Principal=Depends(require_provisioned_principal), db: Sessio
 def list_messages(thread_id: str,p:Principal=Depends(require_provisioned_principal),db:Session=Depends(get_db)):
     thread_access(db,thread_id,p)
     rows=db.scalars(select(Message).where(Message.thread_id==thread_id,Message.tenant_id==p.tenant_id).order_by(Message.created_at)).all()
-    return [{
-        "id":m.id,
-        "author_type":m.author_type,
-        "agent_id":m.author_id if m.author_type=="agent" else None,
-        "agent_name":m.agent_name,
-        "content":m.content,
-        "created_at":m.created_at,
-    } for m in rows]
+    return [{"id":m.id,"author_type":m.author_type,"agent_name":m.agent_name,"content":m.content,"created_at":m.created_at} for m in rows]
 
 @router.post("/threads/{thread_id}/messages")
 async def send_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(require_provisioned_principal),
                        settings:Settings=Depends(get_settings),db:Session=Depends(get_db)):
     _,member=thread_access(db,thread_id,p)
     if member.thread_role==ThreadRole.viewer.value: raise HTTPException(403,"THREAD_READ_ONLY")
-    decision=_resolve_target_or_404(payload.agent, settings)
-    execution=decision.execution
-    availability=decision.availability
-    turn=build_direct_turn(
-        execution=execution,
-        thread_id=thread_id,
-        tenant_id=p.tenant_id,
-        user_id=p.user_id,
-        requested_target=payload.agent,
-        channel=RuntimeChannel.CHAT_JSON,
-    )
-    observer=ExecutionObserver.from_turn(turn,execution_engine=execution.execution_engine.value)
-    observer.start()
+    execution=_resolve_execution_or_404(payload.agent)
     try:
         llm.ensure_configured(settings)
     except llm.LLMNotConfigured:
-        observer.fail("LLM_NOT_CONFIGURED")
         raise HTTPException(503,"LLM_NOT_CONFIGURED")
 
     user=Message(tenant_id=p.tenant_id,thread_id=thread_id,author_type="user",author_id=p.user_id,content=payload.content)
     db.add(user); db.commit()
-    github_messages = await github_context_messages(
-        settings,
-        message=payload.content,
-        is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
-    )
-    history=_history(
-        db,
-        thread_id,
-        p.tenant_id,
-        settings,
-        extra_system_messages=github_messages,
-    )
+    history=_history(db,thread_id,p.tenant_id,settings)
 
     try:
         answer=await llm.generate(settings,execution.resolved_target,history)
     except llm.LLMNotConfigured:
-        observer.fail("LLM_NOT_CONFIGURED")
         raise HTTPException(503,"LLM_NOT_CONFIGURED")
     except llm.LLMUpstreamError:
-        observer.fail("LLM_UPSTREAM_ERROR")
         raise HTTPException(502,"LLM_UPSTREAM_ERROR")
 
-    assistant,envelope=persist_agent_response(db,turn=turn,content=answer)
-    observer.persisted(message_id=assistant.id)
-    observer.complete()
-    return {
-        "message_id":assistant.id,
-        "execution_id":turn.execution_id,
-        "agent_id":envelope.agent_id,
-        "agent_name":envelope.agent_name,
-        "content":envelope.content,
-        "execution":{
-            "request_id":turn.request_id,
-            "execution_id":turn.execution_id,
-            "resolved_target":execution.resolved_target,
-            "turn_owner":execution.turn_owner,
-            "display_agent_id":turn.display_agent_id,
-            "execution_engine":execution.execution_engine.value,
-            "ownership_locked":execution.ownership_locked,
-            "chat_availability":{
-                "status":availability.chat.status.value,
-                "eligible":availability.chat.eligible,
-                "reason_code":availability.chat.reason_code,
-            },
-        },
-        "response":envelope_payload(envelope),
-    }
+    assistant=Message(tenant_id=p.tenant_id,thread_id=thread_id,author_type="agent",
+                      author_id=execution.turn_owner,agent_name=execution.display_agent,content=answer)
+    db.add(assistant); db.commit()
+    return {"message_id":assistant.id,"agent_name":execution.display_agent,"content":answer,
+            "execution":{"resolved_target":execution.resolved_target,"turn_owner":execution.turn_owner,
+                         "execution_engine":execution.execution_engine.value,"ownership_locked":execution.ownership_locked}}
 
 @router.post("/threads/{thread_id}/stream")
 async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(require_provisioned_principal),
@@ -406,17 +227,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
     _,member=thread_access(db,thread_id,p)
     if member.thread_role==ThreadRole.viewer.value: raise HTTPException(403,"THREAD_READ_ONLY")
     if not settings.realtime_streaming_enabled: raise HTTPException(403,"REALTIME_STREAMING_DISABLED")
-    decision=_resolve_target_or_404(payload.agent, settings)
-    execution=decision.execution
-    availability=decision.availability
-    turn=build_direct_turn(
-        execution=execution,
-        thread_id=thread_id,
-        tenant_id=p.tenant_id,
-        user_id=p.user_id,
-        requested_target=payload.agent,
-        channel=RuntimeChannel.CHAT_SSE,
-    )
+    execution=_resolve_execution_or_404(payload.agent)
 
     configured=True
     try:
@@ -427,195 +238,61 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
     agent=execution.resolved_target
     tenant_id=p.tenant_id
     user_id=p.user_id
-    artifact_intent=detect_artifact_intent(payload.content)
-    artifact_allowed=bool(
-        artifact_intent
-        and settings.artifacts_enabled
-        and member.can_generate_artifacts
-    )
-    if artifact_intent is not None:
-        artifact_gate_logger.info(
-            "ARTIFACT_GATE %s",
-            json.dumps(
-                {
-                    "event": "artifact_gate_evaluated",
-                    "execution_id": turn.execution_id,
-                    "thread_id": thread_id,
-                    "requested_agent": payload.agent,
-                    "resolved_agent": turn.resolved_agent_id,
-                    "requested_format": artifact_intent.requested_format,
-                    "artifacts_enabled": bool(settings.artifacts_enabled),
-                    "can_generate_artifacts": bool(member.can_generate_artifacts),
-                    "artifact_allowed": artifact_allowed,
-                    "environment": settings.environment,
-                    "release_sha": settings.release_sha,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            ),
-        )
 
     if configured:
         db.add(Message(tenant_id=tenant_id,thread_id=thread_id,author_type="user",author_id=user_id,content=payload.content))
         db.commit()
-        github_messages = await github_context_messages(
-            settings,
-            message=payload.content,
-            is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
-        )
-        runtime_system_messages = list(github_messages)
-        if artifact_allowed and artifact_intent is not None:
-            runtime_system_messages.append(
-                artifact_generation_system_message(artifact_intent)
-            )
-        history=_history(
-            db,
-            thread_id,
-            tenant_id,
-            settings,
-            extra_system_messages=runtime_system_messages,
-        )
+        history=_history(db,thread_id,tenant_id,settings)
     else:
         history=[]
 
-    def sse_event(event: RuntimeEvent) -> str:
-        data=dict(event.data)
-        data.setdefault("execution_id", event.execution_id)
-        data.setdefault("sequence", event.sequence)
-        return f"event: {event.event_type.value}\ndata: {json.dumps(data,ensure_ascii=False)}\n\n"
-
-    correlation=ExecutionCorrelation(
-        request_id=turn.request_id,
-        execution_id=turn.execution_id,
-        tenant_id=turn.tenant_id,
-        thread_id=turn.thread_id,
-        owner_agent_id=turn.turn_owner_agent_id,
-        execution_engine=execution.execution_engine.value,
-    )
-    observer=ExecutionObserver.from_turn(turn,execution_engine=execution.execution_engine.value)
-    observer.start()
+    def sse(event:str,data:dict)->str:
+        return f"event: {event}\ndata: {json.dumps(data,ensure_ascii=False)}\n\n"
 
     async def events():
-        emitted:list[RuntimeEvent]=[]
-        sequence=1
-
-        def event(kind: RuntimeEventType, **data: object) -> RuntimeEvent:
-            nonlocal sequence
-            item=RuntimeEvent(kind, turn.execution_id, sequence, correlation.event_data(**data))
-            sequence += 1
-            emitted.append(item)
-            return item
-
-        def terminal(kind: RuntimeEventType, **data: object) -> RuntimeEvent:
-            item=event(kind, **data)
-            validate_runtime_sequence(tuple(emitted))
-            return item
-
         if not configured:
-            observer.fail("LLM_NOT_CONFIGURED")
-            yield sse_event(event(RuntimeEventType.ERROR,code="LLM_NOT_CONFIGURED",message="Integração de linguagem não configurada."))
-            yield sse_event(terminal(RuntimeEventType.DONE,status="failed"))
+            yield sse("error",{"code":"LLM_NOT_CONFIGURED","message":"Integração de linguagem não configurada."})
+            yield sse("done",{"status":"failed"})
             return
-
-        yield sse_event(event(
-            RuntimeEventType.STATUS,
-            status="started",
-            agent=agent,
-            agent_id=turn.turn_owner_agent_id,
-            ownership_locked=turn.ownership_locked,
-            chat_availability=availability.chat.status.value,
-        ))
+        yield sse("status",{"status":"started","agent":agent})
         parts:list[str]=[]
         try:
             async for piece in llm.stream(settings,agent,history):
                 parts.append(piece)
-                yield sse_event(event(RuntimeEventType.CHUNK,text=piece))
+                yield sse("chunk",{"text":piece})
         except llm.LLMNotConfigured:
-            observer.fail("LLM_NOT_CONFIGURED")
-            yield sse_event(event(RuntimeEventType.ERROR,code="LLM_NOT_CONFIGURED"))
-            yield sse_event(terminal(RuntimeEventType.DONE,status="failed"))
+            yield sse("error",{"code":"LLM_NOT_CONFIGURED"})
+            yield sse("done",{"status":"failed"})
             return
         except Exception:
-            observer.fail("LLM_UPSTREAM_ERROR")
-            yield sse_event(event(RuntimeEventType.ERROR,code="LLM_UPSTREAM_ERROR"))
-            yield sse_event(terminal(RuntimeEventType.DONE,status="failed"))
+            yield sse("error",{"code":"LLM_UPSTREAM_ERROR"})
+            yield sse("done",{"status":"failed"})
             return
 
         answer="".join(parts).strip()
         if not answer:
-            observer.fail("LLM_EMPTY_RESPONSE")
-            yield sse_event(event(RuntimeEventType.ERROR,code="LLM_EMPTY_RESPONSE"))
-            yield sse_event(terminal(RuntimeEventType.DONE,status="failed"))
+            yield sse("error",{"code":"LLM_EMPTY_RESPONSE"})
+            yield sse("done",{"status":"failed"})
             return
 
+        # Reutiliza a sessao injetada. Abrir SessionLocal aqui criaria um
+        # caminho de acesso ao banco que escapa de dependency_overrides e
+        # de qualquer configuracao aplicada por injecao.
+        # A transacao nao fica aberta durante a chamada de rede porque o
+        # commit da mensagem do usuario ocorre antes do streaming.
         message_id=None
         try:
-            row,envelope=persist_agent_response(db,turn=turn,content=answer)
+            row=Message(tenant_id=tenant_id,thread_id=thread_id,author_type="agent",
+                        author_id=execution.turn_owner,agent_name=execution.display_agent,content=answer)
+            db.add(row); db.commit()
             message_id=row.id
         except Exception:
             db.rollback()
-            observer.fail("PERSISTENCE_FAILED")
-            yield sse_event(event(RuntimeEventType.ERROR,code="PERSISTENCE_FAILED"))
-            yield sse_event(terminal(RuntimeEventType.DONE,status="failed"))
+            yield sse("error",{"code":"PERSISTENCE_FAILED"})
+            yield sse("done",{"status":"failed"})
             return
 
-        generated_artifact=None
-        if artifact_allowed and artifact_intent is not None:
-            try:
-                validated=render_and_validate(
-                    intent=artifact_intent,
-                    content=answer,
-                    filename=default_filename(
-                        artifact_intent,
-                        agent_name=turn.display_agent_name,
-                    ),
-                )
-                generated_artifact=persist_validated_artifact(
-                    db,
-                    settings=settings,
-                    tenant_id=tenant_id,
-                    thread_id=thread_id,
-                    created_by=user_id,
-                    validated=validated,
-                    source_message_sha256=hashlib.sha256(payload.content.encode("utf-8")).hexdigest(),
-                    source_response_message_id=message_id,
-                    agent_id=turn.turn_owner_agent_id,
-                )
-            except ArtifactGenerationError as exc:
-                observer.fail(getattr(exc, "code", "ARTIFACT_GENERATION_FAILED"))
-                yield sse_event(event(
-                    RuntimeEventType.ERROR,
-                    code=getattr(exc, "code", "ARTIFACT_GENERATION_FAILED"),
-                    message="Falha ao gerar ou validar o artefato solicitado.",
-                ))
-                yield sse_event(terminal(RuntimeEventType.DONE,status="failed",message_id=message_id))
-                return
-            except Exception:
-                observer.fail("ARTIFACT_GENERATION_FAILED")
-                yield sse_event(event(
-                    RuntimeEventType.ERROR,
-                    code="ARTIFACT_GENERATION_FAILED",
-                    message="Falha ao persistir o artefato solicitado.",
-                ))
-                yield sse_event(terminal(RuntimeEventType.DONE,status="failed",message_id=message_id))
-                return
-
-        observer.persisted(message_id=message_id)
-        observer.complete()
-        done_payload=dict(
-            status="completed",
-            message_id=message_id,
-            agent_id=envelope.agent_id,
-            agent_name=envelope.agent_name,
-            resolved_target=execution.resolved_target,
-            turn_owner=execution.turn_owner,
-            display_agent_id=turn.display_agent_id,
-            ownership_locked=execution.ownership_locked,
-            response=envelope_payload(envelope),
-        )
-        if generated_artifact is not None:
-            done_payload["artifact"]=artifact_payload(generated_artifact)
-        yield sse_event(terminal(RuntimeEventType.DONE, **done_payload))
+        yield sse("done",{"status":"completed","message_id":message_id,"agent_name":execution.display_agent,"resolved_target":execution.resolved_target,"turn_owner":execution.turn_owner,"execution_engine":execution.execution_engine.value,"ownership_locked":execution.ownership_locked})
 
     return StreamingResponse(events(),media_type="text/event-stream",
                              headers={"Cache-Control":"no-store","X-Accel-Buffering":"no"})
@@ -662,85 +339,14 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
     root=Path(settings.artifact_storage_path).resolve()
     target=(root/key).resolve()
     if not str(target).startswith(str(root)+"/"): raise HTTPException(400,"STORAGE_PATH_INVALID")
-    try:
-        result=persist_attachment(
-            db,
-            tenant_id=p.tenant_id,
-            thread_id=thread_id,
-            uploaded_by=p.user_id,
-            filename=safe,
-            mime_type=file.content_type,
-            data=data,
-            sha256=digest,
-            storage_key=key,
-            target=target,
-        )
-    except AttachmentIdentityConflict as exc:
-        raise HTTPException(409,"ATTACHMENT_IDENTITY_CONFLICT") from exc
-    return {
-        "id":result.attachment.id,
-        "filename":result.attachment.filename,
-        "sha256":result.attachment.sha256,
-        "reused":result.reused,
-    }
-
-@router.get("/threads/{thread_id}/artifacts")
-def list_artifacts(
-    thread_id:str,
-    p:Principal=Depends(require_provisioned_principal),
-    db:Session=Depends(get_db),
-):
-    _,member=thread_access(db,thread_id,p)
-    if not member.can_download_artifacts:
-        raise HTTPException(403,"ARTIFACT_DOWNLOAD_PERMISSION_REQUIRED")
-    rows=db.scalars(
-        select(Artifact).where(
-            Artifact.thread_id==thread_id,
-            Artifact.tenant_id==p.tenant_id,
-        ).order_by(Artifact.created_at.desc(), Artifact.id.desc())
-    ).all()
-    return [{
-        "id":row.id,
-        "filename":row.filename,
-        "mime_type":row.mime_type,
-        "sha256":row.sha256,
-        "version":row.version,
-        "created_at":row.created_at.isoformat() if row.created_at else None,
-        "download_path":f"/api/v2/artifacts/{row.id}/download",
-    } for row in rows]
-
-
-@router.get("/artifacts/{artifact_id}/download")
-def download_artifact(
-    artifact_id:str,
-    p:Principal=Depends(require_provisioned_principal),
-    settings:Settings=Depends(get_settings),
-    db:Session=Depends(get_db),
-):
-    row=db.get(Artifact,artifact_id)
-    if not row or row.tenant_id != p.tenant_id:
-        raise HTTPException(404,"ARTIFACT_NOT_FOUND")
-    _,member=thread_access(db,row.thread_id,p)
-    if not member.can_download_artifacts:
-        raise HTTPException(403,"ARTIFACT_DOWNLOAD_PERMISSION_REQUIRED")
-    root=Path(settings.artifact_storage_path).resolve()
-    target=(root/row.storage_key).resolve()
-    if not str(target).startswith(str(root)+"/"):
-        raise HTTPException(400,"STORAGE_PATH_INVALID")
-    if not target.is_file():
-        raise HTTPException(404,"ARTIFACT_FILE_NOT_FOUND")
-    if hashlib.sha256(target.read_bytes()).hexdigest() != row.sha256:
-        raise HTTPException(409,"ARTIFACT_INTEGRITY_MISMATCH")
-    return FileResponse(
-        path=target,
-        media_type=row.mime_type,
-        filename=row.filename,
-        headers={"Cache-Control":"private, no-store"},
-    )
-
+    target.parent.mkdir(parents=True,exist_ok=True); target.write_bytes(data)
+    row=Attachment(tenant_id=p.tenant_id,thread_id=thread_id,uploaded_by=p.user_id,filename=safe,
+                   mime_type=file.content_type,size_bytes=len(data),sha256=digest,storage_key=key)
+    db.add(row); db.commit()
+    return {"id":row.id,"filename":safe,"sha256":digest}
 
 @router.post("/evolution/proposals")
-def create_proposal(payload:EvolutionProposalCreate,p:Principal=Depends(require_provisioned_admin),db:Session=Depends(get_db)):
+def create_proposal(payload:EvolutionProposalCreate,p:Principal=Depends(require_admin),db:Session=Depends(get_db)):
     assert_provisioned(db,p)
     row=EvolutionProposal(tenant_id=p.tenant_id,created_by=p.user_id,**payload.model_dump())
     db.add(row); db.commit()
@@ -748,6 +354,6 @@ def create_proposal(payload:EvolutionProposalCreate,p:Principal=Depends(require_
             "write_executed":False,"commit_executed":False,"merge_executed":False,"deploy_executed":False}
 
 @router.get("/admin/security/status")
-def security_status(p:Principal=Depends(require_provisioned_admin),settings:Settings=Depends(get_settings)):
+def security_status(p:Principal=Depends(require_admin),settings:Settings=Depends(get_settings)):
     return {"auth_mode":settings.auth_mode,"demo_headers_enabled":settings.demo_headers_enabled,
             "github_read_only":settings.github_read_only,"evolution_execution_allowed":settings.evolution_execution_allowed}

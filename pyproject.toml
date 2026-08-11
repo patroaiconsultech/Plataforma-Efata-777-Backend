@@ -31,6 +31,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-
-[tool.setuptools.package-data]
-"orkio_v2.agents" = ["*.json"]
