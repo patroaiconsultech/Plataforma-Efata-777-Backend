@@ -91,6 +91,22 @@ class Settings(BaseSettings):
 
     voice_enabled: bool = Field(False, alias="PLATFORM_REALTIME_VOICE_ENABLED")
     voice_provider: str = Field("disabled", alias="PLATFORM_VOICE_PROVIDER")
+    voice_bindings_json: str = Field("{}", alias="PLATFORM_VOICE_BINDINGS_JSON")
+
+    tts_enabled: bool = Field(False, alias="PLATFORM_TTS_ENABLED")
+    tts_provider: Literal["disabled","openai"] = Field("disabled", alias="PLATFORM_TTS_PROVIDER")
+    tts_http_timeout_seconds: float = Field(20.0, alias="PLATFORM_TTS_HTTP_TIMEOUT_SECONDS")
+    tts_max_chars: int = Field(4096, alias="PLATFORM_TTS_MAX_CHARS")
+    tts_user_rate_limit_per_minute: int = Field(12, alias="PLATFORM_TTS_USER_RATE_LIMIT_PER_MINUTE")
+    tts_tenant_rate_limit_per_minute: int = Field(60, alias="PLATFORM_TTS_TENANT_RATE_LIMIT_PER_MINUTE")
+    tts_message_rate_limit_per_minute: int = Field(4, alias="PLATFORM_TTS_MESSAGE_RATE_LIMIT_PER_MINUTE")
+    tts_cache_enabled: bool = Field(True, alias="PLATFORM_TTS_CACHE_ENABLED")
+    tts_cache_path: str = Field("./data/tts-cache", alias="PLATFORM_TTS_CACHE_PATH")
+
+    realtime_bridge_enabled: bool = Field(False, alias="PLATFORM_REALTIME_BRIDGE_ENABLED")
+    realtime_transcription_model: str = Field(
+        "gpt-4o-mini-transcribe", alias="PLATFORM_REALTIME_TRANSCRIPTION_MODEL"
+    )
 
     stt_enabled: bool = Field(False, alias="PLATFORM_STT_ENABLED")
     stt_provider: Literal["disabled","faster_whisper"] = Field(
@@ -147,6 +163,20 @@ class Settings(BaseSettings):
             raise ValueError("GITHUB_READ_LIMITS_INVALID")
         if self.voice_enabled and self.voice_provider == "disabled":
             raise ValueError("VOICE_PROVIDER_REQUIRED")
+        if self.tts_enabled and self.tts_provider == "disabled":
+            raise ValueError("TTS_PROVIDER_REQUIRED")
+        if self.tts_http_timeout_seconds <= 0:
+            raise ValueError("TTS_TIMEOUT_INVALID")
+        if self.tts_max_chars <= 0 or self.tts_max_chars > 4096:
+            raise ValueError("TTS_MAX_CHARS_INVALID")
+        if (
+            self.tts_user_rate_limit_per_minute <= 0
+            or self.tts_tenant_rate_limit_per_minute <= 0
+            or self.tts_message_rate_limit_per_minute <= 0
+        ):
+            raise ValueError("TTS_RATE_LIMIT_INVALID")
+        if not self.tts_cache_path.strip():
+            raise ValueError("TTS_CACHE_PATH_REQUIRED")
         if self.stt_enabled and self.stt_provider == "disabled":
             raise ValueError("STT_PROVIDER_REQUIRED")
         if self.stt_max_upload_bytes <= 0:

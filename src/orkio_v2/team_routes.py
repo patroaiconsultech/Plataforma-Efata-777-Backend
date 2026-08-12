@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 import asyncio
 import json
 
@@ -24,6 +26,7 @@ from .services.team_runtime import (
     persist_user_message,
     team_audit,
     team_history,
+    team_definition_payload,
 )
 from .runtime.events import RuntimeEvent, RuntimeEventType, validate_runtime_sequence
 from .services.execution_correlation import ExecutionCorrelation
@@ -35,8 +38,13 @@ router = APIRouter(prefix="/api/v2", tags=["team"])
 class TeamMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=100000)
     team_id: str = Field("general_team", min_length=1, max_length=80)
-    orchestrator_agent_id: str = Field(min_length=1, max_length=80)
-    participant_agent_ids: list[str] = Field(min_length=2, max_length=8)
+    selection_mode: Literal["explicit", "all_eligible"] = "explicit"
+    contributor_agent_ids: list[str] = Field(default_factory=list, max_length=64)
+    # Rolling-deploy compatibility only. Server remains authoritative for chair.
+    orchestrator_agent_id: str | None = Field(default=None, max_length=80)
+    participant_agent_ids: list[str] | None = Field(default=None, max_length=64)
+
+
 
 
 def _raise_team_error(exc: TeamContractError):
@@ -45,9 +53,9 @@ def _raise_team_error(exc: TeamContractError):
         status = 404
     elif exc.code in {"THREAD_ACCESS_DENIED", "THREAD_READ_ONLY"}:
         status = 403
-    elif exc.code in {"TEAM_NOT_FOUND", "TEAM_AGENT_NOT_FOUND"}:
+    elif exc.code in {"TEAM_NOT_FOUND", "TEAM_AGENT_NOT_FOUND", "TEAM_CONTRIBUTOR_NOT_FOUND"}:
         status = 404
-    elif exc.code in {"TEAM_AGENT_NOT_ALLOWED", "TEAM_ORCHESTRATOR_NOT_ALLOWED"}:
+    elif exc.code in {"TEAM_AGENT_NOT_ALLOWED", "TEAM_CONTRIBUTOR_NOT_ALLOWED", "TEAM_ORCHESTRATOR_NOT_ALLOWED", "TEAM_CHAIR_AS_CONTRIBUTOR_FORBIDDEN"}:
         status = 403
     elif exc.code.endswith("_UNCONFIGURED") or exc.code.endswith("_NOT_BOUND"):
         status = 503
@@ -60,17 +68,11 @@ def _raise_team_error(exc: TeamContractError):
 @router.get("/teams")
 def teams_catalog(
     p: Principal = Depends(require_provisioned_principal),
+    settings: Settings = Depends(get_settings),
 ):
     del p
     return [
-        {
-            "team_id": item.team_id,
-            "display_name": item.display_name,
-            "orchestrator_agent_id": item.orchestrator_agent_id,
-            "candidate_agent_ids": list(item.candidate_agent_ids),
-            "max_delegation_depth": item.max_delegation_depth,
-            "enabled": item.enabled,
-        }
+        team_definition_payload(item, settings)
         for item in list_team_definitions()
     ]
 
@@ -87,6 +89,8 @@ async def stream_team_message(
         assert_team_thread_access(db, thread_id=thread_id, principal=p)
         plan = build_team_plan(
             team_id=payload.team_id,
+            selection_mode=payload.selection_mode,
+            contributor_agent_ids=payload.contributor_agent_ids,
             orchestrator_agent_id=payload.orchestrator_agent_id,
             participant_agent_ids=payload.participant_agent_ids,
             settings=settings,
@@ -115,14 +119,14 @@ async def stream_team_message(
         turn=turn,
         action="team_mode_requested",
         outcome="accepted",
-        metadata={"team_id": plan.definition.team_id, "participants_count": len(plan.participant_agent_ids)},
+        metadata={"team_id": plan.definition.team_id, "participants_count": len(plan.contributor_agent_ids)},
     )
     team_audit(
         db,
         turn=turn,
         action="team_authorized",
         outcome="success",
-        metadata={"team_id": plan.definition.team_id, "participants_count": len(plan.participant_agent_ids)},
+        metadata={"team_id": plan.definition.team_id, "participants_count": len(plan.contributor_agent_ids)},
     )
 
     persist_user_message(db, turn=turn, content=payload.content)
@@ -170,7 +174,7 @@ async def stream_team_message(
                 turn=turn,
                 action="orchestration_started",
                 outcome="started",
-                metadata={"team_id": plan.definition.team_id, "participants_count": len(plan.participant_agent_ids)},
+                metadata={"team_id": plan.definition.team_id, "participants_count": len(plan.contributor_agent_ids)},
             )
             yield sse_event(
                 event(
@@ -179,7 +183,8 @@ async def stream_team_message(
                     team_id=plan.definition.team_id,
                     orchestrator_agent_id=plan.orchestrator_agent_id,
                     participant_agent_ids=list(plan.participant_agent_ids),
-                    participants_count=len(plan.participant_agent_ids),
+                    contributor_agent_ids=list(plan.contributor_agent_ids),
+                    participants_count=len(plan.contributor_agent_ids),
                     ownership_locked=True,
                 )
             )
@@ -187,9 +192,7 @@ async def stream_team_message(
             contributions: list[tuple[str, str]] = []
             failures: list[tuple[str, str]] = []
 
-            for agent_id in plan.participant_agent_ids:
-                if agent_id == plan.orchestrator_agent_id:
-                    continue
+            for agent_id in plan.contributor_agent_ids:
                 from .agents.registry import resolve_agent_by_id
                 agent = resolve_agent_by_id(agent_id)
                 yield sse_event(
@@ -430,7 +433,7 @@ async def stream_team_message(
                 outcome="success",
                 metadata={
                     "team_id": plan.definition.team_id,
-                    "participants_count": len(plan.participant_agent_ids),
+                    "participants_count": len(plan.contributor_agent_ids),
                     "completed_agents": len(contributions),
                     "failed_agents": len(failures),
                     "message_id": row.id,
@@ -442,6 +445,7 @@ async def stream_team_message(
                     status="completed",
                     team_id=plan.definition.team_id,
                     participant_agent_ids=list(plan.participant_agent_ids),
+                    contributor_agent_ids=list(plan.contributor_agent_ids),
                     completed_agent_ids=[agent_id for agent_id, _ in contributions],
                     failed_agent_ids=[agent_id for agent_id, _ in failures],
                     orchestrator_agent_id=plan.orchestrator_agent_id,

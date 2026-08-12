@@ -17,7 +17,7 @@ from .services.identity import (
     assert_provisioned,
 )
 from .services import llm
-from .services.document_context import document_context_message
+from .services.document_context import build_document_context, document_context_message
 from .services.artifact_context import artifact_context_message
 from .services.platform_knowledge import platform_knowledge_message
 from .services.attachment_service import AttachmentIdentityConflict, persist_attachment
@@ -768,6 +768,62 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
         "filename":result.attachment.filename,
         "sha256":result.attachment.sha256,
         "reused":result.reused,
+    }
+
+
+@router.get("/threads/{thread_id}/document-context")
+def document_context_provenance(
+    thread_id: str,
+    p: Principal = Depends(require_provisioned_principal),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    _, member = thread_access(db, thread_id, p)
+    if not member.can_view_attachments:
+        raise HTTPException(403, "ATTACHMENT_VIEW_PERMISSION_REQUIRED")
+    bundle = build_document_context(
+        db,
+        settings=settings,
+        tenant_id=p.tenant_id,
+        thread_id=thread_id,
+    )
+    if bundle is None:
+        return {
+            "available": False,
+            "sources": 0,
+            "source_ids": [],
+            "extraction_status": "none",
+            "source_chars": 0,
+            "provided_chars": 0,
+            "per_source_truncated": False,
+            "aggregate_truncated": False,
+            "truncated": False,
+            "context_version": "1.1",
+            "source_provenance": [],
+        }
+    prov = bundle.provenance
+    return {
+        "available": prov.available,
+        "sources": prov.sources,
+        "source_ids": list(prov.source_ids),
+        "extraction_status": prov.extraction_status,
+        "source_chars": prov.source_chars,
+        "provided_chars": prov.provided_chars,
+        "per_source_truncated": prov.per_source_truncated,
+        "aggregate_truncated": prov.aggregate_truncated,
+        "truncated": prov.truncated,
+        "context_version": prov.context_version,
+        "source_provenance": [
+            {
+                "attachment_id": item.attachment_id,
+                "filename": item.filename,
+                "extraction_status": item.extraction_status,
+                "source_chars": item.source_chars,
+                "provided_chars": item.provided_chars,
+                "truncated": item.truncated,
+            }
+            for item in prov.source_provenance
+        ],
     }
 
 @router.get("/threads/{thread_id}/artifacts")

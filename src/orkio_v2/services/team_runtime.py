@@ -19,8 +19,14 @@ from .document_context import document_context_message
 from .platform_knowledge import platform_knowledge_message
 
 
-MAX_TEAM_PARTICIPANTS = 8
-MIN_TEAM_PARTICIPANTS = 2
+
+MAX_TEAM_CONTRIBUTORS = 8
+MIN_TEAM_CONTRIBUTORS = 2
+
+# Compatibility aliases for pre-v1.1 callers/tests. New code uses contributor terminology.
+MAX_TEAM_PARTICIPANTS = MAX_TEAM_CONTRIBUTORS
+MIN_TEAM_PARTICIPANTS = MIN_TEAM_CONTRIBUTORS
+
 TEAM_ALLOWED_THREAD_ROLES = {
     ThreadRole.owner.value,
     ThreadRole.moderator.value,
@@ -44,12 +50,26 @@ class TeamDefinition:
     enabled: bool
     max_delegation_depth: int
 
+    @property
+    def candidate_contributor_agent_ids(self) -> tuple[str, ...]:
+        """Specialist contributors only; the canonical chair is never a contributor."""
+        return tuple(
+            agent_id
+            for agent_id in self.candidate_agent_ids
+            if agent_id != self.orchestrator_agent_id
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class TeamPlan:
     definition: TeamDefinition
     orchestrator_agent_id: str
-    participant_agent_ids: tuple[str, ...]
+    contributor_agent_ids: tuple[str, ...]
+
+    @property
+    def participant_agent_ids(self) -> tuple[str, ...]:
+        """Legacy projection used only for compatibility/UI migration."""
+        return (self.orchestrator_agent_id, *self.contributor_agent_ids)
 
 
 def _team_definitions() -> tuple[TeamDefinition, ...]:
@@ -85,65 +105,161 @@ def resolve_team_definition(team_id: str) -> TeamDefinition:
     return item
 
 
-def _dedupe(values: Iterable[str]) -> tuple[str, ...]:
+def _dedupe_contributors(values: Iterable[str]) -> tuple[str, ...]:
     seen: set[str] = set()
     result: list[str] = []
     for value in values:
         normalized = str(value or "").strip()
         if not normalized:
-            raise TeamContractError("TEAM_PARTICIPANT_ID_REQUIRED")
+            raise TeamContractError("TEAM_CONTRIBUTOR_ID_REQUIRED")
         if normalized in seen:
-            raise TeamContractError("TEAM_DUPLICATE_PARTICIPANT", agent_id=normalized)
+            raise TeamContractError("TEAM_DUPLICATE_CONTRIBUTOR", agent_id=normalized)
         seen.add(normalized)
         result.append(normalized)
     return tuple(result)
 
 
+def _eligible_contributors(definition: TeamDefinition, settings) -> tuple[str, ...]:
+    result: list[str] = []
+    for agent_id in definition.candidate_contributor_agent_ids:
+        try:
+            resolve_agent_by_id(agent_id)
+        except AgentNotFound:
+            continue
+        availability = availability_for_id(agent_id, settings)
+        if availability.team.eligible:
+            result.append(agent_id)
+    return tuple(result)
+
+
+def team_definition_payload(
+    definition_or_id: TeamDefinition | str,
+    settings,
+) -> dict[str, object]:
+    definition = (
+        resolve_team_definition(definition_or_id)
+        if isinstance(definition_or_id, str)
+        else definition_or_id
+    )
+    candidates = definition.candidate_contributor_agent_ids
+    eligible = _eligible_contributors(definition, settings)
+    eligible_count = len(eligible)
+    return {
+        "team_id": definition.team_id,
+        "display_name": definition.display_name,
+        "orchestrator_agent_id": definition.orchestrator_agent_id,
+        "candidate_contributor_agent_ids": list(candidates),
+        # legacy field kept for one rolling-deploy window; still excludes chair in v1.1
+        "candidate_agent_ids": list(candidates),
+        "participant_policy": {
+            "min_contributors": MIN_TEAM_CONTRIBUTORS,
+            "max_contributors": MAX_TEAM_CONTRIBUTORS,
+            "eligible_count": eligible_count,
+            "select_all_supported": (
+                MIN_TEAM_CONTRIBUTORS <= eligible_count <= MAX_TEAM_CONTRIBUTORS
+            ),
+        },
+        "max_delegation_depth": definition.max_delegation_depth,
+        "enabled": definition.enabled,
+    }
+
+
 def build_team_plan(
     *,
     team_id: str,
-    orchestrator_agent_id: str,
-    participant_agent_ids: Iterable[str],
     settings,
+    selection_mode: str = "explicit",
+    contributor_agent_ids: Iterable[str] = (),
+    # Legacy rollout compatibility. Neither field is authoritative in v1.1.
+    orchestrator_agent_id: str | None = None,
+    participant_agent_ids: Iterable[str] | None = None,
 ) -> TeamPlan:
     definition = resolve_team_definition(team_id)
-    participants = _dedupe(participant_agent_ids)
-    if len(participants) < MIN_TEAM_PARTICIPANTS:
-        raise TeamContractError("TEAM_MIN_PARTICIPANTS_REQUIRED")
-    if len(participants) > MAX_TEAM_PARTICIPANTS:
-        raise TeamContractError("TEAM_MAX_PARTICIPANTS_EXCEEDED")
+    chair = definition.orchestrator_agent_id
 
-    orchestrator_id = str(orchestrator_agent_id or "").strip()
-    if not orchestrator_id:
-        raise TeamContractError("TEAM_ORCHESTRATOR_REQUIRED")
-    if orchestrator_id != definition.orchestrator_agent_id:
-        raise TeamContractError(
-            "TEAM_ORCHESTRATOR_NOT_ALLOWED",
-            agent_id=orchestrator_id,
+    legacy_chair = str(orchestrator_agent_id or "").strip()
+    if legacy_chair and legacy_chair != chair:
+        raise TeamContractError("TEAM_ORCHESTRATOR_NOT_ALLOWED", agent_id=legacy_chair)
+
+    normalized_mode = str(selection_mode or "explicit").strip().casefold()
+    if normalized_mode not in {"explicit", "all_eligible"}:
+        raise TeamContractError("TEAM_SELECTION_MODE_INVALID")
+
+    if participant_agent_ids is not None:
+        # Legacy clients used participant_agent_ids=[chair, specialists].
+        # The chair is stripped server-side and never enters the contributor plan.
+        if tuple(contributor_agent_ids):
+            raise TeamContractError("TEAM_PARTICIPANT_PAYLOAD_AMBIGUOUS")
+        legacy_values = tuple(str(x or "").strip() for x in participant_agent_ids)
+        seen: set[str] = set()
+        for value in legacy_values:
+            if not value:
+                raise TeamContractError("TEAM_PARTICIPANT_ID_REQUIRED")
+            if value in seen:
+                raise TeamContractError("TEAM_DUPLICATE_PARTICIPANT", agent_id=value)
+            seen.add(value)
+        contributor_values = tuple(value for value in legacy_values if value != chair)
+    else:
+        contributor_values = tuple(contributor_agent_ids)
+
+    if normalized_mode == "all_eligible":
+        if contributor_values:
+            raise TeamContractError("TEAM_ALL_ELIGIBLE_WITH_EXPLICIT_CONTRIBUTORS")
+        eligible = _eligible_contributors(definition, settings)
+        if not (
+            MIN_TEAM_CONTRIBUTORS <= len(eligible) <= MAX_TEAM_CONTRIBUTORS
+        ):
+            raise TeamContractError("TEAM_SELECT_ALL_NOT_SUPPORTED")
+        contributors = eligible
+    else:
+        contributors = _dedupe_contributors(contributor_values)
+
+    if chair in contributors:
+        raise TeamContractError("TEAM_CHAIR_AS_CONTRIBUTOR_FORBIDDEN", agent_id=chair)
+    if len(contributors) < MIN_TEAM_CONTRIBUTORS:
+        # Contract v1.1 has one canonical minimum across every accepted request
+        # family. Legacy payloads may retain legacy error vocabulary, but they
+        # cannot weaken the number of real specialist contributors.
+        code = (
+            "TEAM_MIN_PARTICIPANTS_REQUIRED"
+            if participant_agent_ids is not None
+            else "TEAM_MIN_CONTRIBUTORS_REQUIRED"
         )
-    if orchestrator_id not in participants:
-        raise TeamContractError("TEAM_ORCHESTRATOR_MUST_BE_PARTICIPANT", agent_id=orchestrator_id)
+        raise TeamContractError(code)
+    if len(contributors) > MAX_TEAM_CONTRIBUTORS:
+        code = (
+            "TEAM_MAX_PARTICIPANTS_EXCEEDED"
+            if participant_agent_ids is not None
+            else "TEAM_MAX_CONTRIBUTORS_EXCEEDED"
+        )
+        raise TeamContractError(code)
 
-    allowed = set(definition.candidate_agent_ids)
-    allowed.add(definition.orchestrator_agent_id)
-    for agent_id in participants:
+    allowed = set(definition.candidate_contributor_agent_ids)
+    legacy_payload = participant_agent_ids is not None
+    for agent_id in contributors:
         if agent_id not in allowed:
-            raise TeamContractError("TEAM_AGENT_NOT_ALLOWED", agent_id=agent_id)
+            raise TeamContractError(
+                "TEAM_AGENT_NOT_ALLOWED" if legacy_payload else "TEAM_CONTRIBUTOR_NOT_ALLOWED",
+                agent_id=agent_id,
+            )
         try:
             resolve_agent_by_id(agent_id)
         except AgentNotFound as exc:
-            raise TeamContractError("TEAM_AGENT_NOT_FOUND", agent_id=agent_id) from exc
+            raise TeamContractError(
+                "TEAM_AGENT_NOT_FOUND" if legacy_payload else "TEAM_CONTRIBUTOR_NOT_FOUND",
+                agent_id=agent_id,
+            ) from exc
         availability = availability_for_id(agent_id, settings)
         if not availability.team.eligible:
             raise TeamContractError(
-                availability.team.reason_code or "TEAM_AGENT_UNAVAILABLE",
+                availability.team.reason_code or "TEAM_CONTRIBUTOR_UNAVAILABLE",
                 agent_id=agent_id,
             )
 
     return TeamPlan(
         definition=definition,
-        orchestrator_agent_id=orchestrator_id,
-        participant_agent_ids=participants,
+        orchestrator_agent_id=chair,
+        contributor_agent_ids=contributors,
     )
 
 

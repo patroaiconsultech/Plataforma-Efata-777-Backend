@@ -166,7 +166,7 @@ def test_team_rejects_agent_outside_selected_team(
             "content": "x",
             "team_id": "executive_team",
             "orchestrator_agent_id": "orkio",
-            "participant_agent_ids": ["orkio", "auditor"],
+            "participant_agent_ids": ["orkio", "chris", "auditor"],
         },
         headers=headers(),
     )
@@ -189,7 +189,7 @@ def test_team_rejects_invalid_agent(client, team_configured, monkeypatch):
             "content": "x",
             "team_id": "general_team",
             "orchestrator_agent_id": "orkio",
-            "participant_agent_ids": ["orkio", "not-an-agent"],
+            "participant_agent_ids": ["orkio", "chris", "not-an-agent"],
         },
         headers=headers(),
     )
@@ -292,7 +292,7 @@ def test_team_complete_contributor_failure_emits_error_then_done(
             "content": "x",
             "team_id": "general_team",
             "orchestrator_agent_id": "orkio",
-            "participant_agent_ids": ["orkio", "chris"],
+            "participant_agent_ids": ["orkio", "chris", "orion"],
         },
         headers=headers(),
     )
@@ -352,7 +352,7 @@ async def test_team_cancelled_generator_records_cancel_without_terminal_fabricat
                 content="cancel",
                 team_id="general_team",
                 orchestrator_agent_id="orkio",
-                participant_agent_ids=["orkio", "chris"],
+                participant_agent_ids=["orkio", "chris", "orion"],
             ),
             p=principal,
             settings=team_configured,

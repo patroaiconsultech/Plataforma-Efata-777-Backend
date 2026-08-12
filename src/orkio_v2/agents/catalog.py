@@ -54,6 +54,7 @@ def _definition(row: dict) -> AgentDefinition:
         localized_role_labels=dict(row.get("localized_role_labels") or {}),
         founder_direct_access=bool(row.get("founder_direct_access", False)),
         legacy_identity=row.get("legacy_identity"),
+        voice_binding_id=row.get("voice_binding_id"),
         system_instruction=str(row["system_instruction"]),
         target_kind=TargetKind.AGENT,
         enabled=bool(row.get("enabled_in_catalog", False)),

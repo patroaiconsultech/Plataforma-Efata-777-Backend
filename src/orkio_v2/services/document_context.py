@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -36,12 +37,48 @@ class DocumentExtractionFailed(DocumentContextError):
     code = "DOCUMENT_EXTRACTION_FAILED"
 
 
+_TRUNCATION_MARKER = "\n[document context truncated]"
+
+
 @dataclass(frozen=True)
 class ExtractedDocument:
     attachment_id: str
     filename: str
     mime_type: str
     text: str
+
+
+@dataclass(frozen=True)
+class DocumentSourceProvenance:
+    attachment_id: str
+    filename: str
+    extraction_status: str
+    source_chars: int
+    provided_chars: int
+    truncated: bool
+    content_sha256: str
+
+
+@dataclass(frozen=True)
+class DocumentContextProvenance:
+    available: bool
+    sources: int
+    source_ids: tuple[str, ...]
+    extraction_status: str
+    source_chars: int
+    provided_chars: int
+    per_source_truncated: bool
+    aggregate_truncated: bool
+    truncated: bool
+    context_version: str = "1.1"
+    source_provenance: tuple[DocumentSourceProvenance, ...] = ()
+
+
+@dataclass(frozen=True)
+class DocumentContextBundle:
+    message: dict[str, str]
+    provenance: DocumentContextProvenance
+    errors: tuple[dict[str, str], ...]
 
 
 _TEXT_MIME_TYPES = {
@@ -63,13 +100,13 @@ def _safe_storage_path(settings: Settings, storage_key: str) -> Path:
     return target
 
 
-def _normalise_text(value: str, *, max_chars: int) -> str:
+def _normalise_text(value: str, *, max_chars: int | None = None) -> str:
     cleaned = value.replace("\x00", "")
     cleaned = re.sub(r"\r\n?", "\n", cleaned)
     cleaned = re.sub(r"[ \t]+", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-    if len(cleaned) > max_chars:
-        cleaned = cleaned[:max_chars].rstrip() + "\n[document context truncated]"
+    if max_chars is not None and len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars].rstrip() + _TRUNCATION_MARKER
     return cleaned
 
 
@@ -137,18 +174,18 @@ def _extract_pdf(raw: bytes, *, max_pages: int) -> str:
                 break
             pages.append(page.extract_text() or "")
         return "\n".join(pages)
-    except Exception as exc:  # provider/parser errors are normalized for callers
+    except Exception as exc:
         raise DocumentExtractionFailed("DOCUMENT_PDF_EXTRACTION_FAILED") from exc
 
 
-def extract_document_text(
+def _extract_document_text_unbounded(
     *,
     filename: str,
     mime_type: str,
     raw: bytes,
-    max_chars: int,
     max_pdf_pages: int,
 ) -> str:
+    del filename  # filename is retained in the public signature for auditability/future adapters.
     _validate_magic(mime_type, raw)
     if mime_type in _TEXT_MIME_TYPES:
         text = _extract_text_plain(raw, mime_type=mime_type)
@@ -159,19 +196,61 @@ def extract_document_text(
     else:
         raise DocumentExtractionUnsupported("DOCUMENT_EXTRACTION_UNSUPPORTED")
 
-    text = _normalise_text(text, max_chars=max_chars)
+    text = _normalise_text(text)
     if len(text) < 1:
         raise DocumentExtractionFailed("DOCUMENT_EXTRACTION_EMPTY")
     return text
 
 
-def load_thread_documents(
+def extract_document_text(
+    *,
+    filename: str,
+    mime_type: str,
+    raw: bytes,
+    max_chars: int,
+    max_pdf_pages: int,
+) -> str:
+    """Backward-compatible extraction API.
+
+    The legacy function still returns a prompt-ready string and therefore keeps the
+    historical truncation marker. Provenance-aware callers use build_document_context(),
+    where diagnostic marker characters are never counted as provided source characters.
+    """
+    text = _extract_document_text_unbounded(
+        filename=filename,
+        mime_type=mime_type,
+        raw=raw,
+        max_pdf_pages=max_pdf_pages,
+    )
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + _TRUNCATION_MARKER
+    return text
+
+
+def _status_for(*, successful_sources: int, errors: int, truncated: bool) -> str:
+    if successful_sources == 0:
+        return "failed" if errors else "none"
+    if errors or truncated:
+        return "partial"
+    return "ready"
+
+
+def build_document_context(
     db: Session,
     *,
     settings: Settings,
     tenant_id: str,
     thread_id: str,
-) -> tuple[list[ExtractedDocument], list[dict[str, str]]]:
+) -> DocumentContextBundle | None:
+    """Build document material plus truthful provenance for a canonical turn.
+
+    source_chars is measured after extraction/normalisation but before character
+    context limits. provided_chars counts only actual source characters supplied
+    to the model; diagnostic marker text is excluded from that metric.
+    """
+    if not settings.document_context_enabled:
+        return None
+
     rows = db.scalars(
         select(Attachment)
         .where(
@@ -181,37 +260,78 @@ def load_thread_documents(
         .order_by(Attachment.created_at.asc(), Attachment.id.asc())
         .limit(settings.document_context_max_files)
     ).all()
+    if not rows:
+        return None
 
-    documents: list[ExtractedDocument] = []
+    remaining = max(0, int(settings.document_context_max_chars))
+    blocks: list[str] = [
+        "DOCUMENT CONTEXT — successfully extracted document content supplied below is "
+        "available as source material for this turn. You may use the supplied content. "
+        "Do not claim that no document content is available when content is supplied. "
+        "Do not claim access to omitted or truncated portions, original file bytes, or "
+        "attachments whose extraction failed."
+    ]
     errors: list[dict[str, str]] = []
-    remaining = settings.document_context_max_chars
+    source_provenance: list[DocumentSourceProvenance] = []
+    source_ids: list[str] = []
+    total_source_chars = 0
+    total_provided_chars = 0
+    any_per_file_truncated = False
+    any_aggregate_truncated = False
+    successful_sources = 0
 
     for attachment in rows:
-        if remaining <= 0:
-            break
         try:
             target = _safe_storage_path(settings, attachment.storage_key)
             raw = target.read_bytes()
-            import hashlib
             digest = hashlib.sha256(raw).hexdigest()
             if digest != attachment.sha256:
                 raise DocumentIntegrityError("DOCUMENT_SHA256_MISMATCH")
-            per_file_limit = min(remaining, settings.document_context_max_chars_per_file)
-            text = extract_document_text(
+
+            full_text = _extract_document_text_unbounded(
                 filename=attachment.filename,
                 mime_type=attachment.mime_type,
                 raw=raw,
-                max_chars=per_file_limit,
                 max_pdf_pages=settings.document_context_max_pdf_pages,
             )
-            documents.append(
-                ExtractedDocument(
+            source_chars = len(full_text)
+            per_limit = max(0, int(settings.document_context_max_chars_per_file))
+            per_file_provided = full_text[:per_limit]
+            per_file_truncated = source_chars > len(per_file_provided)
+
+            provided_text = per_file_provided[:remaining]
+            aggregate_cut_this_source = len(provided_text) < len(per_file_provided)
+            provided_chars = len(provided_text)
+
+            successful_sources += 1
+            source_ids.append(attachment.id)
+            total_source_chars += source_chars
+            total_provided_chars += provided_chars
+            any_per_file_truncated = any_per_file_truncated or per_file_truncated
+            any_aggregate_truncated = any_aggregate_truncated or aggregate_cut_this_source
+
+            content_sha = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
+            source_truncated = per_file_truncated or aggregate_cut_this_source
+            source_provenance.append(
+                DocumentSourceProvenance(
                     attachment_id=attachment.id,
                     filename=attachment.filename,
-                    mime_type=attachment.mime_type,
-                    text=text,
+                    extraction_status="ready",
+                    source_chars=source_chars,
+                    provided_chars=provided_chars,
+                    truncated=source_truncated,
+                    content_sha256=content_sha,
                 )
             )
+
+            if provided_chars:
+                marker = _TRUNCATION_MARKER if source_truncated else ""
+                blocks.append(
+                    f"\n--- attachment:{attachment.id} filename:{attachment.filename} "
+                    f"mime:{attachment.mime_type} ---\n{provided_text}{marker}"
+                )
+                remaining -= provided_chars
+
             document_context_logger.info(
                 "DOCUMENT_CONTEXT_EXTRACTED %s",
                 json.dumps(
@@ -223,12 +343,15 @@ def load_thread_documents(
                         "filename": attachment.filename,
                         "mime_type": attachment.mime_type,
                         "sha256": attachment.sha256,
-                        "chars": len(text),
+                        "source_chars": source_chars,
+                        "provided_chars": provided_chars,
+                        "per_source_truncated": per_file_truncated,
+                        "aggregate_truncated": aggregate_cut_this_source,
+                        "truncated": source_truncated,
                     },
                     sort_keys=True,
                 ),
             )
-            remaining -= len(text)
         except FileNotFoundError:
             code = "DOCUMENT_STORAGE_MISSING"
             errors.append({"attachment_id": attachment.id, "code": code})
@@ -268,7 +391,89 @@ def load_thread_documents(
                 ),
             )
 
-    return documents, errors
+    # A source successfully extracted after the aggregate limit is exhausted is still
+    # evidence of aggregate truncation, even though it contributes zero model chars.
+    if successful_sources and any(item.provided_chars == 0 and item.source_chars > 0 for item in source_provenance):
+        any_aggregate_truncated = True
+
+    truncated = any_per_file_truncated or any_aggregate_truncated
+    available = total_provided_chars > 0
+    extraction_status = _status_for(
+        successful_sources=successful_sources,
+        errors=len(errors),
+        truncated=truncated,
+    )
+
+    if errors:
+        blocks.append("\nDOCUMENT EXTRACTION ERRORS:")
+        for error in errors:
+            blocks.append(f"- attachment:{error['attachment_id']} code:{error['code']}")
+
+    provenance = DocumentContextProvenance(
+        available=available,
+        sources=successful_sources,
+        source_ids=tuple(source_ids),
+        extraction_status=extraction_status,
+        source_chars=total_source_chars,
+        provided_chars=total_provided_chars,
+        per_source_truncated=any_per_file_truncated,
+        aggregate_truncated=any_aggregate_truncated,
+        truncated=truncated,
+        source_provenance=tuple(source_provenance),
+    )
+    return DocumentContextBundle(
+        message={"role": "system", "content": "\n".join(blocks)},
+        provenance=provenance,
+        errors=tuple(errors),
+    )
+
+
+def load_thread_documents(
+    db: Session,
+    *,
+    settings: Settings,
+    tenant_id: str,
+    thread_id: str,
+) -> tuple[list[ExtractedDocument], list[dict[str, str]]]:
+    """Compatibility wrapper for existing callers/tests.
+
+    New code should use build_document_context() for provenance.
+    """
+    bundle = build_document_context(
+        db,
+        settings=settings,
+        tenant_id=tenant_id,
+        thread_id=thread_id,
+    )
+    if bundle is None:
+        return [], []
+
+    docs: list[ExtractedDocument] = []
+    for source in bundle.provenance.source_provenance:
+        # Reconstruct prompt-visible text only. This wrapper is not a provenance API.
+        prefix = f"--- attachment:{source.attachment_id} filename:{source.filename} "
+        content = bundle.message["content"]
+        at = content.find(prefix)
+        if at < 0:
+            continue
+        start = content.find("\n", at)
+        if start < 0:
+            continue
+        end = content.find("\n--- attachment:", start + 1)
+        if end < 0:
+            end = content.find("\nDOCUMENT EXTRACTION ERRORS:", start + 1)
+        if end < 0:
+            end = len(content)
+        text = content[start + 1:end]
+        docs.append(
+            ExtractedDocument(
+                attachment_id=source.attachment_id,
+                filename=source.filename,
+                mime_type="",
+                text=text,
+            )
+        )
+    return docs, list(bundle.errors)
 
 
 def document_context_message(
@@ -278,30 +483,10 @@ def document_context_message(
     tenant_id: str,
     thread_id: str,
 ) -> dict | None:
-    if not settings.document_context_enabled:
-        return None
-
-    documents, errors = load_thread_documents(
+    bundle = build_document_context(
         db,
         settings=settings,
         tenant_id=tenant_id,
         thread_id=thread_id,
     )
-    if not documents and not errors:
-        return None
-
-    blocks: list[str] = [
-        "DOCUMENT CONTEXT — use only as source material for this thread. "
-        "Do not claim to have read attachments whose extraction failed."
-    ]
-    for document in documents:
-        blocks.append(
-            f"\n--- attachment:{document.attachment_id} filename:{document.filename} "
-            f"mime:{document.mime_type} ---\n{document.text}"
-        )
-    if errors:
-        blocks.append("\nDOCUMENT EXTRACTION ERRORS:")
-        for error in errors:
-            blocks.append(f"- attachment:{error['attachment_id']} code:{error['code']}")
-
-    return {"role": "system", "content": "\n".join(blocks)}
+    return bundle.message if bundle is not None else None

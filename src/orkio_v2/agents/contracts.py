@@ -38,6 +38,7 @@ class AgentDefinition:
     localized_role_labels: Mapping[str, str] = field(default_factory=dict)
     founder_direct_access: bool = False
     legacy_identity: str | None = None
+    voice_binding_id: str | None = None
     catalog_version: str = ""
 
 
