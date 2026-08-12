@@ -73,7 +73,7 @@ async def execute_realtime_direct(
     transcript: str,
 ) -> RealtimeExecutionResult:
     try:
-        decision = resolve_direct_target_decision(agent_id, settings)
+        decision = resolve_direct_target_decision(f"id:{agent_id}", settings)
     except Exception as exc:
         raise _unexpected_execution_error(stage="resolve_target", exc=exc) from exc
 

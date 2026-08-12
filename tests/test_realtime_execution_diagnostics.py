@@ -5,7 +5,8 @@ from conftest import headers
 from orkio_v2.config import get_settings
 from orkio_v2.services.realtime_session import RealtimeCallResult
 
-def test_real_realtime_direct_executor_exposes_safe_failure_stage(client, monkeypatch, caplog):
+
+def test_real_realtime_direct_executor_accepts_canonical_session_owner(client, monkeypatch, caplog):
     settings = get_settings()
     monkeypatch.setattr(settings, "voice_enabled", True, raising=False)
     monkeypatch.setattr(settings, "voice_provider", "openai", raising=False)
@@ -42,9 +43,14 @@ def test_real_realtime_direct_executor_exposes_safe_failure_stage(client, monkey
             model="gpt-realtime",
             output_modalities=("text",),
         )
+
     async def fake_generate(settings, agent_id, history):
         assert agent_id == "orkio"
-        assert any(item["role"] == "user" and item["content"] == "Pergunta realtime real executor" for item in history)
+        assert any(
+            item["role"] == "user"
+            and item["content"] == "Pergunta realtime real executor"
+            for item in history
+        )
         return "Resposta canônica do executor real."
 
     monkeypatch.setattr("orkio_v2.realtime_routes.create_realtime_call", fake_call)
@@ -53,35 +59,38 @@ def test_real_realtime_direct_executor_exposes_safe_failure_stage(client, monkey
     thread_id = client.post("/api/v2/threads", json={}, headers=headers()).json()["id"]
     session = client.post(
         f"/api/v2/threads/{thread_id}/realtime/calls",
-        json={"sdp":"v=0\r\no=- 1 1 IN IP4 127.0.0.1","agent":"Josué","locale":"pt-BR"},
-        headers=headers(),
-    )
-    assert session.status_code == 200, session.text
-    sid=session.json()["session_id"]
-    response=client.post(
-        f"/api/v2/threads/{thread_id}/realtime/turns",
         json={
-            "session_id":sid,
-            "provider_item_id":"item-real-1",
-            "transcript_final_id":"event-real-1",
-            "transcript":"Pergunta realtime real executor",
+            "sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1",
+            "agent": "Josué",
+            "locale": "pt-BR",
         },
         headers=headers(),
     )
-    assert response.status_code == 502, response.text
-    assert response.json() == {"detail": {"code": "REALTIME_EXECUTION_FAILED"}}
+    assert session.status_code == 200, session.text
+    payload = session.json()
+    assert payload["agent_id"] == "orkio"
+    sid = payload["session_id"]
 
-    diagnostic = next(
-        record.getMessage()
-        for record in caplog.records
-        if record.getMessage().startswith("REALTIME_EXECUTION_FAILURE ")
+    response = client.post(
+        f"/api/v2/threads/{thread_id}/realtime/turns",
+        json={
+            "session_id": sid,
+            "provider_item_id": "item-real-1",
+            "transcript_final_id": "event-real-1",
+            "transcript": "Pergunta realtime real executor",
+        },
+        headers=headers(),
     )
-    assert '"stage": "resolve_target"' in diagnostic
-    assert '"exception_type": "TargetNotFound"' in diagnostic
-    assert '"error_code": "REALTIME_EXECUTION_FAILED"' in diagnostic
-    assert '"pipeline": "realtime_canonical_execution"' in diagnostic
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["terminal_event"] == "done"
+    assert body["agent_id"] == "orkio"
+    assert body["content"] == "Resposta canônica do executor real."
+    assert body["tts_path"].endswith(f"/messages/{body['message_id']}/voice")
 
-    # Sensitive/raw content must not be included in the diagnostic event.
-    assert "Pergunta realtime real executor" not in diagnostic
-    assert "not-real" not in diagnostic
-    assert "Authorization" not in diagnostic
+    assert not any(
+        record.getMessage().startswith("REALTIME_EXECUTION_FAILURE ")
+        for record in caplog.records
+    )
+
