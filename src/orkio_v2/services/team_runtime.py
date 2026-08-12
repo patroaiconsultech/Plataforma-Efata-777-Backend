@@ -116,6 +116,11 @@ def build_team_plan(
     orchestrator_id = str(orchestrator_agent_id or "").strip()
     if not orchestrator_id:
         raise TeamContractError("TEAM_ORCHESTRATOR_REQUIRED")
+    if orchestrator_id != definition.orchestrator_agent_id:
+        raise TeamContractError(
+            "TEAM_ORCHESTRATOR_NOT_ALLOWED",
+            agent_id=orchestrator_id,
+        )
     if orchestrator_id not in participants:
         raise TeamContractError("TEAM_ORCHESTRATOR_MUST_BE_PARTICIPANT", agent_id=orchestrator_id)
 

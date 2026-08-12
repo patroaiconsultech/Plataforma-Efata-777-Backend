@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=8,<10", "pytest-asyncio>=0.24,<1"]
+stt = ["faster-whisper==1.2.1"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -373,3 +373,30 @@ async def test_team_cancelled_generator_records_cancel_without_terminal_fabricat
         and row.metadata_json.get("thread_id") == thread["id"]
     ]
     assert cancelled
+
+def test_team_rejects_client_selected_orchestrator_before_execution(
+    client, team_configured, monkeypatch
+):
+    async def must_not_run(*_args, **_kwargs):
+        pytest.fail("LLM must not execute when browser attempts to replace Team chair")
+        if False:
+            yield ""
+
+    monkeypatch.setattr(llm, "stream", must_not_run)
+    thread = client.post("/api/v2/threads", json={}, headers=headers()).json()
+    response = client.post(
+        f"/api/v2/threads/{thread['id']}/team/stream",
+        json={
+            "content": "x",
+            "team_id": "general_team",
+            "orchestrator_agent_id": "chris",
+            "participant_agent_ids": ["orkio", "chris"],
+        },
+        headers=headers(),
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == {
+        "code": "TEAM_ORCHESTRATOR_NOT_ALLOWED",
+        "agent_id": "chris",
+    }
+

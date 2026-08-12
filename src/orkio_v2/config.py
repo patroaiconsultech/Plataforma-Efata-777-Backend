@@ -92,6 +92,23 @@ class Settings(BaseSettings):
     voice_enabled: bool = Field(False, alias="PLATFORM_REALTIME_VOICE_ENABLED")
     voice_provider: str = Field("disabled", alias="PLATFORM_VOICE_PROVIDER")
 
+    stt_enabled: bool = Field(False, alias="PLATFORM_STT_ENABLED")
+    stt_provider: Literal["disabled","faster_whisper"] = Field(
+        "disabled", alias="PLATFORM_STT_PROVIDER"
+    )
+    stt_model: str = Field("small", alias="PLATFORM_STT_MODEL")
+    stt_device: Literal["cpu","cuda","auto"] = Field("cpu", alias="PLATFORM_STT_DEVICE")
+    stt_compute_type: str = Field("int8", alias="PLATFORM_STT_COMPUTE_TYPE")
+    stt_max_upload_bytes: int = Field(8_000_000, alias="PLATFORM_STT_MAX_UPLOAD_BYTES")
+    stt_allowed_languages: str = Field("pt,en,es", alias="PLATFORM_STT_ALLOWED_LANGUAGES")
+    stt_model_cache_dir: str = Field(
+        "/opt/orkio/models/faster-whisper",
+        alias="PLATFORM_STT_MODEL_CACHE_DIR",
+    )
+    stt_local_files_only: bool = Field(False, alias="PLATFORM_STT_LOCAL_FILES_ONLY")
+    stt_timeout_seconds: float = Field(0.0, alias="PLATFORM_STT_TIMEOUT_SECONDS")
+    stt_concurrency_limit: int = Field(0, alias="PLATFORM_STT_CONCURRENCY_LIMIT")
+
     assisted_evolution_enabled: bool = Field(False, alias="PLATFORM_ASSISTED_EVOLUTION_ENABLED")
     evolution_execution_allowed: bool = Field(False, alias="PLATFORM_EVOLUTION_EXECUTION_ALLOWED")
     human_approval_required: bool = Field(True, alias="PLATFORM_EVOLUTION_HUMAN_APPROVAL_REQUIRED")
@@ -130,6 +147,25 @@ class Settings(BaseSettings):
             raise ValueError("GITHUB_READ_LIMITS_INVALID")
         if self.voice_enabled and self.voice_provider == "disabled":
             raise ValueError("VOICE_PROVIDER_REQUIRED")
+        if self.stt_enabled and self.stt_provider == "disabled":
+            raise ValueError("STT_PROVIDER_REQUIRED")
+        if self.stt_max_upload_bytes <= 0:
+            raise ValueError("STT_MAX_UPLOAD_BYTES_INVALID")
+        if not self.stt_model_cache_dir.strip():
+            raise ValueError("STT_MODEL_CACHE_DIR_REQUIRED")
+        if self.stt_enabled and self.stt_timeout_seconds <= 0:
+            raise ValueError("STT_TIMEOUT_SECONDS_REQUIRED")
+        if self.stt_enabled and self.stt_concurrency_limit <= 0:
+            raise ValueError("STT_CONCURRENCY_LIMIT_REQUIRED")
+        if self.environment == "production" and self.stt_enabled and not self.stt_local_files_only:
+            raise ValueError("STT_PRODUCTION_REQUIRES_PREWARMED_LOCAL_MODEL")
+        allowed_languages = {
+            item.strip().lower()
+            for item in self.stt_allowed_languages.split(",")
+            if item.strip()
+        }
+        if not allowed_languages or not allowed_languages.issubset({"pt", "en", "es"}):
+            raise ValueError("STT_ALLOWED_LANGUAGES_INVALID")
         if self.llm_provider_failover_enabled:
             raise ValueError("LLM_PROVIDER_FAILOVER_FORBIDDEN_UNTIL_GOVERNED")
         if self.llm_auto_route_enabled:

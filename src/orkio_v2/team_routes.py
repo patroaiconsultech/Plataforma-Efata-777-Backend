@@ -47,7 +47,7 @@ def _raise_team_error(exc: TeamContractError):
         status = 403
     elif exc.code in {"TEAM_NOT_FOUND", "TEAM_AGENT_NOT_FOUND"}:
         status = 404
-    elif exc.code in {"TEAM_AGENT_NOT_ALLOWED"}:
+    elif exc.code in {"TEAM_AGENT_NOT_ALLOWED", "TEAM_ORCHESTRATOR_NOT_ALLOWED"}:
         status = 403
     elif exc.code.endswith("_UNCONFIGURED") or exc.code.endswith("_NOT_BOUND"):
         status = 503
