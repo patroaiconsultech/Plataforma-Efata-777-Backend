@@ -186,9 +186,16 @@ async def create_realtime_call(
 
     location = str(response.headers.get("Location") or "").strip()
     call_id = location.rstrip("/").split("/")[-1] if location else None
-    answer = str(response.text or "").strip()
-    if not answer:
+    answer = str(response.text or "")
+    if not answer.strip():
         raise RealtimeSessionError("REALTIME_SDP_ANSWER_EMPTY")
+    # Preserve the provider SDP byte structure. Chromium/WebRTC requires the
+    # terminal SDP line to be newline-terminated; stripping the response makes
+    # an otherwise valid final `a=` line fail with "Invalid SDP line".
+    if answer.endswith("\r"):
+        answer += "\n"
+    elif not answer.endswith("\n"):
+        answer += "\r\n"
 
     return RealtimeCallResult(
         sdp_answer=answer,

@@ -121,7 +121,137 @@ async def test_realtime_session_creation_keeps_provider_key_server_side(monkeypa
     assert session_json["output_modalities"] == ["text"]
     assert session_json["tools"] == []
     assert "test-realtime-key-not-real" not in json.dumps(session_json)
-    assert result.sdp_answer == "v=0\\r\\nanswer"
+    assert result.sdp_answer == "v=0\\r\\nanswer" + "\r\n"
+
+
+
+@pytest.mark.asyncio
+async def test_realtime_sdp_terminal_line_break_is_preserved(monkeypatch):
+    settings = _configured(monkeypatch)
+    decision = resolve_direct_target_decision("Joseph", settings)
+    turn = build_turn(
+        execution=decision.execution,
+        thread_id="thread-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        requested_target="Joseph",
+        channel=RuntimeChannel.REALTIME,
+    )
+
+    class FakeResponse:
+        text = "v=0\r\na=ice-pwd:synthetic\r\n"
+        headers = {"Location": "https://api.openai.com/v1/realtime/calls/call_123"}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    result = await create_realtime_call(
+        settings=settings,
+        turn=turn,
+        sdp_offer="v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n",
+    )
+    assert result.sdp_answer == FakeResponse.text
+    assert result.sdp_answer.endswith("\r\n")
+
+
+@pytest.mark.asyncio
+async def test_realtime_sdp_missing_terminal_line_break_is_normalized(monkeypatch):
+    settings = _configured(monkeypatch)
+    decision = resolve_direct_target_decision("Joseph", settings)
+    turn = build_turn(
+        execution=decision.execution,
+        thread_id="thread-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        requested_target="Joseph",
+        channel=RuntimeChannel.REALTIME,
+    )
+
+    class FakeResponse:
+        text = "v=0\r\na=ice-pwd:synthetic"
+        headers = {"Location": "https://api.openai.com/v1/realtime/calls/call_123"}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    result = await create_realtime_call(
+        settings=settings,
+        turn=turn,
+        sdp_offer="v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n",
+    )
+    assert result.sdp_answer == FakeResponse.text + "\r\n"
+    assert result.sdp_answer.endswith("\r\n")
+
+
+@pytest.mark.asyncio
+async def test_realtime_sdp_whitespace_only_answer_is_rejected(monkeypatch):
+    settings = _configured(monkeypatch)
+    decision = resolve_direct_target_decision("Joseph", settings)
+    turn = build_turn(
+        execution=decision.execution,
+        thread_id="thread-1",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        requested_target="Joseph",
+        channel=RuntimeChannel.REALTIME,
+    )
+
+    class FakeResponse:
+        text = " \r\n\t "
+        headers = {}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    with pytest.raises(RealtimeSessionError) as exc:
+        await create_realtime_call(
+            settings=settings,
+            turn=turn,
+            sdp_offer="v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n",
+        )
+    assert exc.value.code == "REALTIME_SDP_ANSWER_EMPTY"
 
 
 def test_realtime_route_is_fail_closed_when_voice_disabled(client, monkeypatch):
