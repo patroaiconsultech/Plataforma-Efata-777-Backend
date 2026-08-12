@@ -20,9 +20,36 @@ from .team_runtime import (
 
 
 class RealtimeExecutionError(RuntimeError):
-    def __init__(self, code: str):
+    def __init__(
+        self,
+        code: str,
+        *,
+        stage: str | None = None,
+        exception_type: str | None = None,
+        request_id: str | None = None,
+        execution_id: str | None = None,
+    ):
         super().__init__(code)
         self.code = code
+        self.stage = stage
+        self.exception_type = exception_type
+        self.request_id = request_id
+        self.execution_id = execution_id
+
+
+def _unexpected_execution_error(
+    *,
+    stage: str,
+    exc: Exception,
+    turn=None,
+) -> RealtimeExecutionError:
+    return RealtimeExecutionError(
+        "REALTIME_EXECUTION_FAILED",
+        stage=stage,
+        exception_type=type(exc).__name__,
+        request_id=getattr(turn, "request_id", None),
+        execution_id=getattr(turn, "execution_id", None),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,31 +72,67 @@ async def execute_realtime_direct(
     agent_id: str,
     transcript: str,
 ) -> RealtimeExecutionResult:
-    decision = resolve_direct_target_decision(agent_id, settings)
-    turn = build_direct_turn(
-        execution=decision.execution,
-        thread_id=thread_id,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        requested_target=agent_id,
-        channel=RuntimeChannel.REALTIME,
-    )
-    persist_user_message(db, turn=turn, content=transcript)
-    history = team_history(
-        db,
-        thread_id=thread_id,
-        tenant_id=tenant_id,
-        settings=settings,
-    )
+    try:
+        decision = resolve_direct_target_decision(agent_id, settings)
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="resolve_target", exc=exc) from exc
+
+    try:
+        turn = build_direct_turn(
+            execution=decision.execution,
+            thread_id=thread_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            requested_target=agent_id,
+            channel=RuntimeChannel.REALTIME,
+        )
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="build_turn", exc=exc) from exc
+
+    try:
+        persist_user_message(db, turn=turn, content=transcript)
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="persist_user", exc=exc, turn=turn) from exc
+
+    try:
+        history = team_history(
+            db,
+            thread_id=thread_id,
+            tenant_id=tenant_id,
+            settings=settings,
+        )
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="history", exc=exc, turn=turn) from exc
+
     try:
         answer = (await llm.generate(settings, turn.turn_owner_agent_id, history)).strip()
     except llm.LLMNotConfigured as exc:
-        raise RealtimeExecutionError("LLM_NOT_CONFIGURED") from exc
+        raise RealtimeExecutionError(
+            "LLM_NOT_CONFIGURED",
+            stage="llm",
+            exception_type=type(exc).__name__,
+            request_id=turn.request_id,
+            execution_id=turn.execution_id,
+        ) from exc
     except Exception as exc:
-        raise RealtimeExecutionError("LLM_UPSTREAM_ERROR") from exc
+        raise RealtimeExecutionError(
+            "LLM_UPSTREAM_ERROR",
+            stage="llm",
+            exception_type=type(exc).__name__,
+            request_id=turn.request_id,
+            execution_id=turn.execution_id,
+        ) from exc
     if not answer:
-        raise RealtimeExecutionError("LLM_EMPTY_RESPONSE")
-    row, _ = persist_agent_response(db, turn=turn, content=answer)
+        raise RealtimeExecutionError(
+            "LLM_EMPTY_RESPONSE",
+            stage="llm",
+            request_id=turn.request_id,
+            execution_id=turn.execution_id,
+        )
+    try:
+        row, _ = persist_agent_response(db, turn=turn, content=answer)
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="persist_agent", exc=exc, turn=turn) from exc
     return RealtimeExecutionResult(
         message_id=row.id,
         execution_id=turn.execution_id,
@@ -98,21 +161,32 @@ async def execute_realtime_team(
         selection_mode=selection_mode,
         contributor_agent_ids=contributor_agent_ids,
     )
-    turn = build_team_turn(
-        thread_id=thread_id,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        requested_target=f"team:{team_id}",
-        orchestrator_agent_id=plan.orchestrator_agent_id,
-        channel=RuntimeChannel.REALTIME,
-    )
-    persist_user_message(db, turn=turn, content=transcript)
-    base_history = team_history(
-        db,
-        thread_id=thread_id,
-        tenant_id=tenant_id,
-        settings=settings,
-    )
+    try:
+        turn = build_team_turn(
+            thread_id=thread_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            requested_target=f"team:{team_id}",
+            orchestrator_agent_id=plan.orchestrator_agent_id,
+            channel=RuntimeChannel.REALTIME,
+        )
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="build_turn", exc=exc) from exc
+
+    try:
+        persist_user_message(db, turn=turn, content=transcript)
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="persist_user", exc=exc, turn=turn) from exc
+
+    try:
+        base_history = team_history(
+            db,
+            thread_id=thread_id,
+            tenant_id=tenant_id,
+            settings=settings,
+        )
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="history", exc=exc, turn=turn) from exc
 
     contributions: list[tuple[str, str]] = []
     for agent_id in plan.contributor_agent_ids:
@@ -122,12 +196,19 @@ async def execute_realtime_team(
             continue
         if not content:
             continue
-        persist_team_contribution(
-            db,
-            turn=turn,
-            agent_id=agent_id,
-            content=content,
-        )
+        try:
+            persist_team_contribution(
+                db,
+                turn=turn,
+                agent_id=agent_id,
+                content=content,
+            )
+        except Exception as exc:
+            raise _unexpected_execution_error(
+                stage="persist_contribution",
+                exc=exc,
+                turn=turn,
+            ) from exc
         contributions.append((agent_id, content))
 
     if not contributions:
@@ -161,13 +242,33 @@ async def execute_realtime_team(
             await llm.generate(settings, plan.orchestrator_agent_id, synthesis_history)
         ).strip()
     except llm.LLMNotConfigured as exc:
-        raise RealtimeExecutionError("LLM_NOT_CONFIGURED") from exc
+        raise RealtimeExecutionError(
+            "LLM_NOT_CONFIGURED",
+            stage="llm_synthesis",
+            exception_type=type(exc).__name__,
+            request_id=turn.request_id,
+            execution_id=turn.execution_id,
+        ) from exc
     except Exception as exc:
-        raise RealtimeExecutionError("LLM_UPSTREAM_ERROR") from exc
+        raise RealtimeExecutionError(
+            "LLM_UPSTREAM_ERROR",
+            stage="llm_synthesis",
+            exception_type=type(exc).__name__,
+            request_id=turn.request_id,
+            execution_id=turn.execution_id,
+        ) from exc
     if not answer:
-        raise RealtimeExecutionError("LLM_EMPTY_RESPONSE")
+        raise RealtimeExecutionError(
+            "LLM_EMPTY_RESPONSE",
+            stage="llm_synthesis",
+            request_id=turn.request_id,
+            execution_id=turn.execution_id,
+        )
 
-    row, _ = persist_team_final(db, turn=turn, content=answer)
+    try:
+        row, _ = persist_team_final(db, turn=turn, content=answer)
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="persist_agent", exc=exc, turn=turn) from exc
     return RealtimeExecutionResult(
         message_id=row.id,
         execution_id=turn.execution_id,

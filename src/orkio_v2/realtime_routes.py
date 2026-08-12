@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+import uuid
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -43,6 +46,7 @@ from .services.voice_binding import VoiceBindingError, resolve_voice_profile
 
 
 router = APIRouter(prefix="/api/v2", tags=["realtime"])
+realtime_logger = logging.getLogger("uvicorn.error")
 
 
 class RealtimeCallCreate(BaseModel):
@@ -112,6 +116,42 @@ def _audit(
     )
     db.add(row)
     db.commit()
+
+
+def _log_realtime_execution_failure(
+    *,
+    diagnostic_request_id: str,
+    principal: Principal,
+    thread_id: str,
+    session_id: str,
+    target_mode: str,
+    stage: str,
+    error_code: str,
+    exception_type: str,
+    execution_id: str | None = None,
+    canonical_request_id: str | None = None,
+) -> None:
+    realtime_logger.error(
+        "REALTIME_EXECUTION_FAILURE %s",
+        json.dumps(
+            {
+                "diagnostic_request_id": diagnostic_request_id,
+                "canonical_request_id": canonical_request_id,
+                "execution_id": execution_id,
+                "tenant_id": principal.tenant_id,
+                "user_id": principal.user_id,
+                "thread_id": thread_id,
+                "session_id": session_id,
+                "target_mode": target_mode,
+                "pipeline": "realtime_canonical_execution",
+                "stage": stage,
+                "status": "failed",
+                "error_code": error_code,
+                "exception_type": exception_type,
+            },
+            sort_keys=True,
+        ),
+    )
 
 
 def _raise_team_contract(exc: TeamContractError) -> None:
@@ -401,8 +441,12 @@ async def realtime_final_turn(
         session_id=payload.session_id,
     )
 
+    diagnostic_request_id = str(uuid.uuid4())
+    target_mode = str(intent.get("target_mode") or "direct")
+    route_stage = "execute_team" if target_mode == "team" else "execute_direct"
+    result = None
+
     try:
-        target_mode = str(intent.get("target_mode") or "direct")
         if target_mode == "team":
             contributor_ids = tuple(
                 str(x) for x in (intent.get("contributor_agent_ids") or [])
@@ -432,6 +476,7 @@ async def realtime_final_turn(
                 transcript=transcript,
             )
 
+        route_stage = "complete_receipt"
         receipt = complete_receipt(
             db,
             tenant_id=p.tenant_id,
@@ -442,9 +487,37 @@ async def realtime_final_turn(
         )
     except (RealtimeExecutionError, TeamContractError) as exc:
         code = getattr(exc, "code", "REALTIME_EXECUTION_FAILED")
+        stage = getattr(exc, "stage", None) or route_stage
+        exception_type = getattr(exc, "exception_type", None) or type(exc).__name__
+        execution_id = getattr(exc, "execution_id", None)
+        canonical_request_id = getattr(exc, "request_id", None)
+        _log_realtime_execution_failure(
+            diagnostic_request_id=diagnostic_request_id,
+            principal=p,
+            thread_id=thread_id,
+            session_id=payload.session_id,
+            target_mode=target_mode,
+            stage=stage,
+            error_code=code,
+            exception_type=exception_type,
+            execution_id=execution_id,
+            canonical_request_id=canonical_request_id,
+        )
         fail_receipt(db, tenant_id=p.tenant_id, turn_key=turn_key, error_code=code)
         raise HTTPException(502, detail={"code": code}) from exc
     except Exception as exc:
+        execution_id = getattr(result, "execution_id", None) if result is not None else None
+        _log_realtime_execution_failure(
+            diagnostic_request_id=diagnostic_request_id,
+            principal=p,
+            thread_id=thread_id,
+            session_id=payload.session_id,
+            target_mode=target_mode,
+            stage=route_stage,
+            error_code="REALTIME_EXECUTION_FAILED",
+            exception_type=type(exc).__name__,
+            execution_id=execution_id,
+        )
         fail_receipt(
             db,
             tenant_id=p.tenant_id,
