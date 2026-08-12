@@ -43,3 +43,11 @@ def test_smoke_plan_is_materialized():
     ]
     for marker in required:
         assert marker in smoke
+
+def test_build_time_prewarm_does_not_enable_runtime_stt_contract():
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    prewarm_block = dockerfile.split('ARG ORKIO_STT_PREWARM_MODEL=""', 1)[1]
+    assert "python scripts/prewarm_stt.py" in prewarm_block
+    assert "PLATFORM_STT_PROVIDER=faster_whisper" in prewarm_block
+    assert "PLATFORM_STT_ENABLED=true" not in prewarm_block
+

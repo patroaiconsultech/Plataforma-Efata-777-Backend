@@ -16,7 +16,6 @@ RUN pip install --no-cache-dir '.[stt]' \
 ARG ORKIO_STT_PREWARM_MODEL=""
 RUN mkdir -p "${PLATFORM_STT_MODEL_CACHE_DIR}" \
     && if [ -n "${ORKIO_STT_PREWARM_MODEL}" ]; then \
-         PLATFORM_STT_ENABLED=true \
          PLATFORM_STT_PROVIDER=faster_whisper \
          PLATFORM_STT_MODEL="${ORKIO_STT_PREWARM_MODEL}" \
          PLATFORM_STT_LOCAL_FILES_ONLY=false \
