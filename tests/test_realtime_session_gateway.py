@@ -17,6 +17,7 @@ from orkio_v2.services.realtime_session import (
     create_realtime_call,
     realtime_capability,
 )
+from orkio_v2.services.voice_binding import VoiceBindingError
 
 
 def _configured(monkeypatch):
@@ -367,3 +368,425 @@ def test_realtime_service_source_never_serializes_openai_key():
     assert '"openai_api_key":' not in source
     assert "'openai_api_key':" not in source
     assert "Authorization" in source  # server-side provider request is intentional
+
+
+
+def _call_capability(
+    *,
+    session_eligible: bool = True,
+    bridge_eligible: bool = True,
+    voice_output_eligible: bool = True,
+):
+    return {
+        "realtime_session": {
+            "eligible": session_eligible,
+            "reason_code": (
+                "REALTIME_SIGNALING_CONFIGURED_NOT_RUNTIME_PROVEN"
+                if session_eligible
+                else "REALTIME_VOICE_DISABLED"
+            ),
+        },
+        "orchestration_bridge": {
+            "eligible": bridge_eligible,
+            "reason_code": (
+                "REALTIME_CANONICAL_BRIDGE_CONFIGURED_NOT_RUNTIME_PROVEN"
+                if bridge_eligible
+                else "REALTIME_ORCHESTRATION_BRIDGE_REQUIRED"
+            ),
+        },
+        "voice_output": {
+            "eligible": voice_output_eligible,
+            "reason_code": (
+                "CANONICAL_MESSAGE_TTS_CONFIGURED_NOT_RUNTIME_PROVEN"
+                if voice_output_eligible
+                else "AGENT_VOICE_BINDING_NOT_VALIDATED"
+            ),
+        },
+    }
+
+
+def _capture_call_failures(monkeypatch):
+    captured = []
+
+    def capture(**kwargs):
+        captured.append(dict(kwargs))
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes._log_realtime_call_failure",
+        capture,
+    )
+    return captured
+
+
+def _thread_audits(thread_id):
+    with Testing() as db:
+        rows = db.scalars(select(AuditEvent)).all()
+    return [
+        row
+        for row in rows
+        if isinstance(row.metadata_json, dict)
+        and row.metadata_json.get("thread_id") == thread_id
+    ]
+
+
+def test_realtime_call_failure_log_is_structured_and_sanitized(monkeypatch):
+    import orkio_v2.realtime_routes as realtime_routes
+
+    settings = _configured(monkeypatch)
+    decision = resolve_direct_target_decision("Joseph", settings)
+    turn = build_turn(
+        execution=decision.execution,
+        thread_id="thread-log-test",
+        tenant_id="tenant-1",
+        user_id="user-1",
+        requested_target="Joseph",
+        channel=RuntimeChannel.REALTIME,
+    )
+
+    rendered = []
+
+    def capture_error(message, *args, **kwargs):
+        del kwargs
+        rendered.append(message % args if args else message)
+
+    monkeypatch.setattr(
+        realtime_routes.realtime_logger,
+        "error",
+        capture_error,
+    )
+
+    realtime_routes._log_realtime_call_failure(
+        settings=settings,
+        turn=turn,
+        target_mode="direct",
+        locale="pt-BR",
+        stage="provider_call",
+        error_code="REALTIME_UPSTREAM_UNAVAILABLE",
+        exception_type="RealtimeSessionError",
+    )
+
+    assert len(rendered) == 1
+    assert rendered[0].startswith("REALTIME_CALL_FAILURE ")
+
+    payload = json.loads(
+        rendered[0].removeprefix("REALTIME_CALL_FAILURE ")
+    )
+
+    assert payload["request_id"] == turn.request_id
+    assert payload["execution_id"] == turn.execution_id
+    assert payload["thread_id"] == turn.thread_id
+    assert payload["tenant_id"] == turn.tenant_id
+    assert payload["user_id"] == turn.user_id
+    assert payload["turn_owner"] == turn.turn_owner_agent_id
+    assert payload["stage"] == "provider_call"
+    assert payload["error_code"] == "REALTIME_UPSTREAM_UNAVAILABLE"
+    assert payload["pipeline"] == "realtime_call_setup"
+    assert payload["status"] == "failed"
+
+    raw = json.dumps(payload)
+    assert "test-realtime-key-not-real" not in raw
+
+    forbidden = {
+        "sdp",
+        "authorization",
+        "token",
+        "secret",
+        "prompt",
+        "transcript",
+        "content",
+    }
+    assert forbidden.isdisjoint({key.casefold() for key in payload})
+
+
+def test_realtime_session_capability_failure_is_observable(
+    client, monkeypatch
+):
+    settings = get_settings()
+    monkeypatch.setattr(settings, "voice_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "voice_provider", "disabled", raising=False)
+    monkeypatch.setattr(settings, "openai_api_key", None, raising=False)
+
+    failures = _capture_call_failures(monkeypatch)
+
+    thread = client.post(
+        "/api/v2/threads",
+        json={},
+        headers=headers(),
+    ).json()
+
+    response = client.post(
+        f"/api/v2/threads/{thread['id']}/realtime/calls",
+        json={
+            "sdp": "v=0\\r\\no=- 1 1 IN IP4 127.0.0.1",
+            "agent": "Joseph",
+        },
+        headers=headers(),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "REALTIME_VOICE_DISABLED"
+
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure["stage"] == "realtime_session_capability"
+    assert failure["error_code"] == "REALTIME_VOICE_DISABLED"
+    assert failure["turn"].request_id
+    assert failure["turn"].execution_id
+
+    failed_audits = [
+        row for row in _thread_audits(thread["id"])
+        if row.action == "realtime_failed"
+    ]
+    assert len(failed_audits) == 1
+    metadata = failed_audits[0].metadata_json
+    assert metadata["stage"] == "realtime_session_capability"
+    assert metadata["request_id"] == failure["turn"].request_id
+    assert metadata["execution_id"] == failure["turn"].execution_id
+
+
+def test_realtime_bridge_failure_is_observable(
+    client, monkeypatch
+):
+    _configured(monkeypatch)
+    failures = _capture_call_failures(monkeypatch)
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.realtime_capability",
+        lambda settings: _call_capability(
+            session_eligible=True,
+            bridge_eligible=False,
+            voice_output_eligible=False,
+        ),
+    )
+
+    async def must_not_create(*args, **kwargs):
+        pytest.fail(
+            "provider session must not be created before bridge eligibility"
+        )
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.create_realtime_call",
+        must_not_create,
+    )
+
+    thread = client.post(
+        "/api/v2/threads",
+        json={},
+        headers=headers(),
+    ).json()
+
+    response = client.post(
+        f"/api/v2/threads/{thread['id']}/realtime/calls",
+        json={
+            "sdp": "v=0\\r\\no=- 1 1 IN IP4 127.0.0.1",
+            "agent": "Joseph",
+        },
+        headers=headers(),
+    )
+
+    assert response.status_code == 503
+    assert (
+        response.json()["detail"]
+        == "REALTIME_ORCHESTRATION_BRIDGE_REQUIRED"
+    )
+
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure["stage"] == "orchestration_bridge"
+    assert (
+        failure["error_code"]
+        == "REALTIME_ORCHESTRATION_BRIDGE_REQUIRED"
+    )
+
+    failed_audits = [
+        row for row in _thread_audits(thread["id"])
+        if row.action == "realtime_failed"
+    ]
+    assert len(failed_audits) == 1
+    assert (
+        failed_audits[0].metadata_json["stage"]
+        == "orchestration_bridge"
+    )
+    assert (
+        failed_audits[0].metadata_json["request_id"]
+        == failure["turn"].request_id
+    )
+
+
+def test_realtime_voice_output_failure_is_observable_without_new_failed_audit(
+    client, monkeypatch
+):
+    _configured(monkeypatch)
+    failures = _capture_call_failures(monkeypatch)
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.realtime_capability",
+        lambda settings: _call_capability(
+            session_eligible=True,
+            bridge_eligible=True,
+            voice_output_eligible=False,
+        ),
+    )
+
+    def must_not_resolve(*args, **kwargs):
+        pytest.fail(
+            "voice binding must not be resolved before voice output eligibility"
+        )
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.resolve_voice_profile",
+        must_not_resolve,
+    )
+
+    thread = client.post(
+        "/api/v2/threads",
+        json={},
+        headers=headers(),
+    ).json()
+
+    response = client.post(
+        f"/api/v2/threads/{thread['id']}/realtime/calls",
+        json={
+            "sdp": "v=0\\r\\no=- 1 1 IN IP4 127.0.0.1",
+            "agent": "Joseph",
+        },
+        headers=headers(),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "REALTIME_VOICE_OUTPUT_REQUIRED"
+    }
+
+    assert len(failures) == 1
+    assert failures[0]["stage"] == "voice_output_capability"
+    assert (
+        failures[0]["error_code"]
+        == "REALTIME_VOICE_OUTPUT_REQUIRED"
+    )
+
+    failed_audits = [
+        row for row in _thread_audits(thread["id"])
+        if row.action == "realtime_failed"
+    ]
+    assert failed_audits == []
+
+
+def test_realtime_voice_binding_failure_is_observable_without_new_failed_audit(
+    client, monkeypatch
+):
+    _configured(monkeypatch)
+    failures = _capture_call_failures(monkeypatch)
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.realtime_capability",
+        lambda settings: _call_capability(),
+    )
+
+    def fail_binding(*args, **kwargs):
+        raise VoiceBindingError("VOICE_BINDING_NOT_FOUND")
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.resolve_voice_profile",
+        fail_binding,
+    )
+
+    async def must_not_create(*args, **kwargs):
+        pytest.fail(
+            "provider call must not occur after voice binding failure"
+        )
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.create_realtime_call",
+        must_not_create,
+    )
+
+    thread = client.post(
+        "/api/v2/threads",
+        json={},
+        headers=headers(),
+    ).json()
+
+    response = client.post(
+        f"/api/v2/threads/{thread['id']}/realtime/calls",
+        json={
+            "sdp": "v=0\\r\\no=- 1 1 IN IP4 127.0.0.1",
+            "agent": "Joseph",
+        },
+        headers=headers(),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == {
+        "code": "VOICE_BINDING_NOT_FOUND"
+    }
+
+    assert len(failures) == 1
+    assert failures[0]["stage"] == "voice_binding"
+    assert failures[0]["error_code"] == "VOICE_BINDING_NOT_FOUND"
+
+    failed_audits = [
+        row for row in _thread_audits(thread["id"])
+        if row.action == "realtime_failed"
+    ]
+    assert failed_audits == []
+
+
+def test_realtime_provider_failure_is_observable_and_preserves_contract(
+    client, monkeypatch
+):
+    _configured(monkeypatch)
+    failures = _capture_call_failures(monkeypatch)
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.realtime_capability",
+        lambda settings: _call_capability(),
+    )
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.resolve_voice_profile",
+        lambda *args, **kwargs: object(),
+    )
+
+    async def fail_provider(*args, **kwargs):
+        raise RealtimeSessionError("REALTIME_UPSTREAM_UNAVAILABLE")
+
+    monkeypatch.setattr(
+        "orkio_v2.realtime_routes.create_realtime_call",
+        fail_provider,
+    )
+
+    thread = client.post(
+        "/api/v2/threads",
+        json={},
+        headers=headers(),
+    ).json()
+
+    response = client.post(
+        f"/api/v2/threads/{thread['id']}/realtime/calls",
+        json={
+            "sdp": "v=0\\r\\no=- 1 1 IN IP4 127.0.0.1",
+            "agent": "Joseph",
+        },
+        headers=headers(),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "REALTIME_UPSTREAM_UNAVAILABLE"
+
+    assert len(failures) == 1
+    failure = failures[0]
+    assert failure["stage"] == "provider_call"
+    assert failure["error_code"] == "REALTIME_UPSTREAM_UNAVAILABLE"
+    assert failure["exception_type"] == "RealtimeSessionError"
+
+    failed_audits = [
+        row for row in _thread_audits(thread["id"])
+        if row.action == "realtime_failed"
+    ]
+    assert len(failed_audits) == 1
+
+    metadata = failed_audits[0].metadata_json
+    assert metadata["stage"] == "provider_call"
+    assert metadata["request_id"] == failure["turn"].request_id
+    assert metadata["execution_id"] == failure["turn"].execution_id
