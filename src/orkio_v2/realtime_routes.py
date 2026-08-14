@@ -14,7 +14,7 @@ from .auth import Principal
 from .config import Settings, get_settings
 from .database import get_db
 from .models import AuditEvent, Message, Thread, ThreadParticipant, ThreadRole
-from .runtime.contracts import RuntimeChannel
+from .runtime.contracts import CanonicalTurnContext, RuntimeChannel
 from .services.direct_runtime import build_turn as build_direct_turn
 from .services.execution_router import resolve_direct_target_decision
 from .services.identity import require_provisioned_principal
@@ -154,6 +154,45 @@ def _log_realtime_execution_failure(
     )
 
 
+def _log_realtime_call_failure(
+    *,
+    settings: Settings,
+    turn: CanonicalTurnContext,
+    target_mode: str,
+    locale: str,
+    stage: str,
+    error_code: str,
+    exception_type: str,
+) -> None:
+    realtime_logger.error(
+        "REALTIME_CALL_FAILURE %s",
+        json.dumps(
+            {
+                "request_id": turn.request_id,
+                "execution_id": turn.execution_id,
+                "thread_id": turn.thread_id,
+                "tenant_id": turn.tenant_id,
+                "user_id": turn.user_id,
+                "requested_target": turn.requested_target,
+                "resolved_agent": turn.resolved_agent_id,
+                "turn_owner": turn.turn_owner_agent_id,
+                "route_family": turn.route_family.value,
+                "channel": turn.channel.value,
+                "target_mode": target_mode,
+                "locale": locale,
+                "pipeline": "realtime_call_setup",
+                "stage": stage,
+                "status": "failed",
+                "error_code": error_code,
+                "exception_type": exception_type,
+                "release_sha": settings.release_sha,
+                "environment": settings.environment,
+            },
+            sort_keys=True,
+        ),
+    )
+
+
 def _raise_team_contract(exc: TeamContractError) -> None:
     status = 400
     if exc.code in {"TEAM_NOT_FOUND", "TEAM_CONTRIBUTOR_NOT_FOUND"}:
@@ -254,6 +293,15 @@ async def realtime_call(
     session_capability = capability["realtime_session"]
     if not bool(session_capability.get("eligible")):
         code = str(session_capability.get("reason_code") or "REALTIME_NOT_CONFIGURED")
+        _log_realtime_call_failure(
+            settings=settings,
+            turn=turn,
+            target_mode=payload.target_mode,
+            locale=payload.locale,
+            stage="realtime_session_capability",
+            error_code=code,
+            exception_type="CapabilityIneligible",
+        )
         _audit(
             db,
             principal=p,
@@ -261,7 +309,12 @@ async def realtime_call(
             action="realtime_failed",
             outcome="failed",
             execution_id=turn.execution_id,
-            metadata={"error_code": code, "agent_id": turn.turn_owner_agent_id},
+            metadata={
+                "request_id": turn.request_id,
+                "stage": "realtime_session_capability",
+                "error_code": code,
+                "agent_id": turn.turn_owner_agent_id,
+            },
         )
         raise HTTPException(403, code)
 
@@ -271,6 +324,15 @@ async def realtime_call(
             bridge_capability.get("reason_code")
             or "REALTIME_ORCHESTRATION_BRIDGE_REQUIRED"
         )
+        _log_realtime_call_failure(
+            settings=settings,
+            turn=turn,
+            target_mode=payload.target_mode,
+            locale=payload.locale,
+            stage="orchestration_bridge",
+            error_code=code,
+            exception_type="CapabilityIneligible",
+        )
         _audit(
             db,
             principal=p,
@@ -278,12 +340,27 @@ async def realtime_call(
             action="realtime_failed",
             outcome="failed",
             execution_id=turn.execution_id,
-            metadata={"error_code": code, "agent_id": turn.turn_owner_agent_id},
+            metadata={
+                "request_id": turn.request_id,
+                "stage": "orchestration_bridge",
+                "error_code": code,
+                "agent_id": turn.turn_owner_agent_id,
+            },
         )
         raise HTTPException(503, code)
 
     if not bool(capability["voice_output"].get("eligible")):
-        raise HTTPException(503, detail={"code": "REALTIME_VOICE_OUTPUT_REQUIRED"})
+        code = "REALTIME_VOICE_OUTPUT_REQUIRED"
+        _log_realtime_call_failure(
+            settings=settings,
+            turn=turn,
+            target_mode=payload.target_mode,
+            locale=payload.locale,
+            stage="voice_output_capability",
+            error_code=code,
+            exception_type="CapabilityIneligible",
+        )
+        raise HTTPException(503, detail={"code": code})
 
     try:
         # Validate the exact output identity before opening microphone transport.
@@ -299,8 +376,26 @@ async def realtime_call(
             sdp_offer=payload.sdp,
         )
     except VoiceBindingError as exc:
+        _log_realtime_call_failure(
+            settings=settings,
+            turn=turn,
+            target_mode=payload.target_mode,
+            locale=payload.locale,
+            stage="voice_binding",
+            error_code=exc.code,
+            exception_type=type(exc).__name__,
+        )
         raise HTTPException(503, detail={"code": exc.code}) from exc
     except RealtimeSessionError as exc:
+        _log_realtime_call_failure(
+            settings=settings,
+            turn=turn,
+            target_mode=payload.target_mode,
+            locale=payload.locale,
+            stage="provider_call",
+            error_code=exc.code,
+            exception_type=type(exc).__name__,
+        )
         _audit(
             db,
             principal=p,
@@ -308,7 +403,12 @@ async def realtime_call(
             action="realtime_failed",
             outcome="failed",
             execution_id=turn.execution_id,
-            metadata={"error_code": exc.code, "agent_id": turn.turn_owner_agent_id},
+            metadata={
+                "request_id": turn.request_id,
+                "stage": "provider_call",
+                "error_code": exc.code,
+                "agent_id": turn.turn_owner_agent_id,
+            },
         )
         status = 403 if exc.code == "REALTIME_VOICE_DISABLED" else 503
         raise HTTPException(status, exc.code) from exc
