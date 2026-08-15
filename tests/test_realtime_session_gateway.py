@@ -14,6 +14,7 @@ from orkio_v2.services.direct_runtime import build_turn
 from orkio_v2.services.execution_router import resolve_direct_target_decision
 from orkio_v2.services.realtime_session import (
     RealtimeSessionError,
+    _transcription_language,
     create_realtime_call,
     realtime_capability,
 )
@@ -121,6 +122,10 @@ async def test_realtime_session_creation_keeps_provider_key_server_side(monkeypa
     session_json = json.loads(captured["files"]["session"][1])
     assert session_json["output_modalities"] == ["text"]
     assert session_json["tools"] == []
+    assert session_json["audio"]["input"]["transcription"] == {
+        "model": settings.realtime_transcription_model,
+        "language": "pt",
+    }
     assert "test-realtime-key-not-real" not in json.dumps(session_json)
     assert result.sdp_answer == "v=0\\r\\nanswer" + "\r\n"
 
@@ -748,7 +753,10 @@ def test_realtime_provider_failure_is_observable_and_preserves_contract(
         lambda *args, **kwargs: object(),
     )
 
+    provider_call = {}
+
     async def fail_provider(*args, **kwargs):
+        provider_call.update(kwargs)
         raise RealtimeSessionError("REALTIME_UPSTREAM_UNAVAILABLE")
 
     monkeypatch.setattr(
@@ -767,12 +775,14 @@ def test_realtime_provider_failure_is_observable_and_preserves_contract(
         json={
             "sdp": "v=0\\r\\no=- 1 1 IN IP4 127.0.0.1",
             "agent": "Joseph",
+            "locale": "es-419",
         },
         headers=headers(),
     )
 
     assert response.status_code == 503
     assert response.json()["detail"] == "REALTIME_UPSTREAM_UNAVAILABLE"
+    assert provider_call["locale"] == "es-419"
 
     assert len(failures) == 1
     failure = failures[0]
@@ -790,3 +800,22 @@ def test_realtime_provider_failure_is_observable_and_preserves_contract(
     assert metadata["stage"] == "provider_call"
     assert metadata["request_id"] == failure["turn"].request_id
     assert metadata["execution_id"] == failure["turn"].execution_id
+
+
+@pytest.mark.parametrize(
+    ("locale", "language"),
+    [
+        ("pt-BR", "pt"),
+        ("en-US", "en"),
+        ("es-419", "es"),
+    ],
+)
+def test_realtime_transcription_language_maps_supported_locales(locale, language):
+    assert _transcription_language(locale) == language
+
+
+def test_realtime_transcription_language_rejects_unknown_locale():
+    with pytest.raises(RealtimeSessionError) as exc:
+        _transcription_language("fr-FR")
+
+    assert exc.value.code == "REALTIME_LOCALE_NOT_SUPPORTED"

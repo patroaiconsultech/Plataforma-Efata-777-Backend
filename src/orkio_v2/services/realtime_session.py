@@ -135,11 +135,23 @@ def _realtime_calls_endpoint(settings: Settings) -> str:
     return f"{base}/realtime/calls"
 
 
+def _transcription_language(locale: str) -> str:
+    language = {
+        "pt-BR": "pt",
+        "en-US": "en",
+        "es-419": "es",
+    }.get(locale)
+    if language is None:
+        raise RealtimeSessionError("REALTIME_LOCALE_NOT_SUPPORTED")
+    return language
+
+
 async def create_realtime_call(
     *,
     settings: Settings,
     turn: CanonicalTurnContext,
     sdp_offer: str,
+    locale: str = "pt-BR",
 ) -> RealtimeCallResult:
     key = _assert_realtime_configured(settings)
     identity = realtime_identity_from_turn(turn)
@@ -157,6 +169,7 @@ async def create_realtime_call(
             "input": {
                 "transcription": {
                     "model": settings.realtime_transcription_model,
+                    "language": _transcription_language(locale),
                 },
                 "turn_detection": {
                     "type": "server_vad",

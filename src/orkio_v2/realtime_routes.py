@@ -374,6 +374,7 @@ async def realtime_call(
             settings=settings,
             turn=turn,
             sdp_offer=payload.sdp,
+            locale=payload.locale,
         )
     except VoiceBindingError as exc:
         _log_realtime_call_failure(
