@@ -1,0 +1,182 @@
+diff --git a/src/orkio_v2/config.py b/src/orkio_v2/config.py
+--- a/src/orkio_v2/config.py
++++ b/src/orkio_v2/config.py
+@@ -89,9 +89,24 @@ class Settings(BaseSettings):
+     tts_cache_enabled: bool = Field(True, alias="PLATFORM_TTS_CACHE_ENABLED")
+     tts_cache_path: str = Field("./data/tts-cache", alias="PLATFORM_TTS_CACHE_PATH")
+     realtime_bridge_enabled: bool = Field(False, alias="PLATFORM_REALTIME_BRIDGE_ENABLED")
++    realtime_turn_detection_mode: Literal["server_vad","semantic_vad"] = Field(
++        "server_vad", alias="PLATFORM_REALTIME_TURN_DETECTION_MODE"
++    )
++    realtime_vad_threshold: float = Field(0.5, alias="PLATFORM_REALTIME_VAD_THRESHOLD")
++    realtime_vad_prefix_padding_ms: int = Field(
++        300, alias="PLATFORM_REALTIME_VAD_PREFIX_PADDING_MS"
++    )
++    realtime_vad_silence_duration_ms: int = Field(
++        1200, alias="PLATFORM_REALTIME_VAD_SILENCE_DURATION_MS"
++    )
++    realtime_semantic_vad_eagerness: Literal["low","medium","high","auto"] = Field(
++        "low", alias="PLATFORM_REALTIME_SEMANTIC_VAD_EAGERNESS"
++    )
+     realtime_transcription_model: str = Field(
+         "gpt-4o-mini-transcribe", alias="PLATFORM_REALTIME_TRANSCRIPTION_MODEL"
+     )
+@@ -157,6 +172,18 @@ class Settings(BaseSettings):
+             raise ValueError("TTS_RATE_LIMIT_INVALID")
+         if not self.tts_cache_path.strip():
+             raise ValueError("TTS_CACHE_PATH_REQUIRED")
++        if not (0.0 < self.realtime_vad_threshold <= 1.0):
++            raise ValueError("REALTIME_VAD_THRESHOLD_INVALID")
++        if not (0 <= self.realtime_vad_prefix_padding_ms <= 5000):
++            raise ValueError("REALTIME_VAD_PREFIX_PADDING_INVALID")
++        # ORKIO operational guardrail. This is intentionally narrower than
++        # "any integer" so a bad ENV cannot create pathological turn latency.
++        if not (200 <= self.realtime_vad_silence_duration_ms <= 5000):
++            raise ValueError("REALTIME_VAD_SILENCE_DURATION_INVALID")
+         if self.stt_enabled and self.stt_provider == "disabled":
+             raise ValueError("STT_PROVIDER_REQUIRED")
+         if self.stt_max_upload_bytes <= 0:
+diff --git a/src/orkio_v2/services/realtime_session.py b/src/orkio_v2/services/realtime_session.py
+--- a/src/orkio_v2/services/realtime_session.py
++++ b/src/orkio_v2/services/realtime_session.py
+@@ -33,6 +33,11 @@ def realtime_capability(settings: Settings) -> dict[str, object]:
+     bridge_configured = bool(session_configured and settings.realtime_bridge_enabled)
+     bindings_configured = (settings.voice_bindings_json or "{}").strip() not in {"", "{}"}
++    turn_detection_reason = (
++        "SEMANTIC_VAD_TRANSCRIPTION_ONLY"
++        if settings.realtime_turn_detection_mode == "semantic_vad"
++        else "SERVER_VAD_TRANSCRIPTION_ONLY"
++    )
+     tts_configured = bool(
+         settings.tts_enabled
+         and settings.tts_provider != "disabled"
+@@ -93,11 +98,9 @@ def realtime_capability(settings: Settings) -> dict[str, object]:
+         "turn_detection": {
+             "status": "CONFIGURED" if session_configured else "NOT_PROVEN",
+             "eligible": session_configured,
++            "mode": settings.realtime_turn_detection_mode,
+             "reason_code": (
+-                "SERVER_VAD_TRANSCRIPTION_ONLY"
+-                if session_configured
+-                else "REALTIME_TURN_DETECTION_NOT_ORKIO_PROVEN"
++                turn_detection_reason if session_configured else "REALTIME_TURN_DETECTION_NOT_ORKIO_PROVEN"
+             ),
+         },
+@@ -136,6 +139,26 @@ def _transcription_language(locale: str) -> str:
+         raise RealtimeSessionError("REALTIME_LOCALE_NOT_SUPPORTED")
+     return language
+
++def _turn_detection_config(settings: Settings) -> dict[str, object]:
++    # The provider owns segmentation only. ORKIO remains the canonical
++    # response/ownership runtime in both modes.
++    if settings.realtime_turn_detection_mode == "semantic_vad":
++        return {
++            "type": "semantic_vad",
++            "eagerness": settings.realtime_semantic_vad_eagerness,
++            "create_response": False,
++            "interrupt_response": False,
++        }
++    return {
++        "type": "server_vad",
++        "threshold": settings.realtime_vad_threshold,
++        "prefix_padding_ms": settings.realtime_vad_prefix_padding_ms,
++        "silence_duration_ms": settings.realtime_vad_silence_duration_ms,
++        "create_response": False,
++        "interrupt_response": False,
++    }
++
+ async def create_realtime_call(
+     *,
+     settings: Settings,
+@@ -160,11 +183,7 @@ async def create_realtime_call(
+                     "model": settings.realtime_transcription_model,
+                     "language": _transcription_language(locale),
+                 },
+-                "turn_detection": {
+-                    "type": "server_vad",
+-                    "create_response": False,
+-                    "interrupt_response": False,
+-                },
++                "turn_detection": _turn_detection_config(settings),
+             }
+         },
+         "tools": [],
+diff --git a/tests/test_realtime_turn_detection_premium.py b/tests/test_realtime_turn_detection_premium.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_realtime_turn_detection_premium.py
+@@ -0,0 +1,74 @@
++from __future__ import annotations
++
++import pytest
++
++from orkio_v2.config import Settings, get_settings
++from orkio_v2.services.realtime_session import (
++    _turn_detection_config,
++    realtime_capability,
++)
++
++
++def test_server_vad_defaults_are_deliberate_and_provider_cannot_answer():
++    settings = Settings(
++        _env_file=None,
++        PLATFORM_REALTIME_TURN_DETECTION_MODE="server_vad",
++        PLATFORM_REALTIME_VAD_THRESHOLD=0.5,
++        PLATFORM_REALTIME_VAD_PREFIX_PADDING_MS=300,
++        PLATFORM_REALTIME_VAD_SILENCE_DURATION_MS=1200,
++    )
++
++    assert _turn_detection_config(settings) == {
++        "type": "server_vad",
++        "threshold": 0.5,
++        "prefix_padding_ms": 300,
++        "silence_duration_ms": 1200,
++        "create_response": False,
++        "interrupt_response": False,
++    }
++
++
++def test_semantic_vad_low_is_available_without_transferring_response_ownership():
++    settings = Settings(
++        _env_file=None,
++        PLATFORM_REALTIME_TURN_DETECTION_MODE="semantic_vad",
++        PLATFORM_REALTIME_SEMANTIC_VAD_EAGERNESS="low",
++    )
++
++    assert _turn_detection_config(settings) == {
++        "type": "semantic_vad",
++        "eagerness": "low",
++        "create_response": False,
++        "interrupt_response": False,
++    }
++
++
++def test_capability_reports_effective_turn_detection_mode(monkeypatch):
++    settings = get_settings()
++    monkeypatch.setattr(settings, "voice_enabled", True, raising=False)
++    monkeypatch.setattr(settings, "voice_provider", "openai", raising=False)
++    monkeypatch.setattr(settings, "openai_api_key", "synthetic-not-real", raising=False)
++    monkeypatch.setattr(settings, "realtime_turn_detection_mode", "semantic_vad", raising=False)
++    monkeypatch.setattr(settings, "realtime_semantic_vad_eagerness", "low", raising=False)
++
++    turn = realtime_capability(settings)["turn_detection"]
++
++    assert turn["eligible"] is True
++    assert turn["mode"] == "semantic_vad"
++    assert turn["reason_code"] == "SEMANTIC_VAD_TRANSCRIPTION_ONLY"
++
++
++@pytest.mark.parametrize(
++    ("field", "value", "error_code"),
++    (
++        ("PLATFORM_REALTIME_VAD_THRESHOLD", 0, "REALTIME_VAD_THRESHOLD_INVALID"),
++        ("PLATFORM_REALTIME_VAD_THRESHOLD", 1.01, "REALTIME_VAD_THRESHOLD_INVALID"),
++        ("PLATFORM_REALTIME_VAD_PREFIX_PADDING_MS", -1, "REALTIME_VAD_PREFIX_PADDING_INVALID"),
++        ("PLATFORM_REALTIME_VAD_PREFIX_PADDING_MS", 5001, "REALTIME_VAD_PREFIX_PADDING_INVALID"),
++        ("PLATFORM_REALTIME_VAD_SILENCE_DURATION_MS", 199, "REALTIME_VAD_SILENCE_DURATION_INVALID"),
++        ("PLATFORM_REALTIME_VAD_SILENCE_DURATION_MS", 5001, "REALTIME_VAD_SILENCE_DURATION_INVALID"),
++    ),
++)
++def test_realtime_turn_detection_guardrails_fail_closed(field, value, error_code):
++    with pytest.raises(ValueError, match=error_code):
++        Settings(_env_file=None, **{field: value})
