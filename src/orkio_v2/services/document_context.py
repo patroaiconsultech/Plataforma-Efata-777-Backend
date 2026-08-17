@@ -5,6 +5,7 @@ import io
 import json
 import logging
 import re
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +58,9 @@ class DocumentSourceProvenance:
     provided_chars: int
     truncated: bool
     content_sha256: str
+    selection_mode: str = "full"
+    selected_ranges: tuple[str, ...] = ()
+    priority_reason: str = "legacy_oldest"
 
 
 @dataclass(frozen=True)
@@ -70,7 +74,7 @@ class DocumentContextProvenance:
     per_source_truncated: bool
     aggregate_truncated: bool
     truncated: bool
-    context_version: str = "1.1"
+    context_version: str = "2.0"
     source_provenance: tuple[DocumentSourceProvenance, ...] = ()
 
 
@@ -79,6 +83,14 @@ class DocumentContextBundle:
     message: dict[str, str]
     provenance: DocumentContextProvenance
     errors: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True)
+class SelectedExcerpt:
+    text: str
+    provided_chars: int
+    selection_mode: str
+    selected_ranges: tuple[str, ...]
 
 
 _TEXT_MIME_TYPES = {
@@ -90,6 +102,134 @@ _PDF_MIME = "application/pdf"
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 document_context_logger = logging.getLogger("uvicorn.error")
+
+_QUERY_STOPWORDS = {
+    "a", "ao", "aos", "as", "com", "da", "das", "de", "do", "dos", "e", "em",
+    "esse", "esta", "este", "isso", "me", "o", "os", "para", "por", "que", "se",
+    "um", "uma", "analise", "analisar", "analisa", "documento", "arquivo", "anexo",
+    "favor", "please", "analyze", "analyse", "document", "file", "attachment",
+}
+
+
+def _search_tokens(value: str) -> set[str]:
+    folded = (
+        unicodedata.normalize("NFKD", value or "")
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+    )
+    return {
+        item
+        for item in re.findall(r"[a-z0-9]{2,}", folded)
+        if item not in _QUERY_STOPWORDS
+    }
+
+
+def _distributed_indices(total: int, slots: int) -> list[int]:
+    if total <= 0 or slots <= 0:
+        return []
+    if slots >= total:
+        return list(range(total))
+    if slots == 1:
+        return [0]
+    return sorted({
+        round(index * (total - 1) / (slots - 1))
+        for index in range(slots)
+    })
+
+
+def _select_excerpt(
+    text: str,
+    *,
+    query: str,
+    max_chars: int,
+    chunk_chars: int,
+) -> SelectedExcerpt:
+    if max_chars <= 0:
+        return SelectedExcerpt("", 0, "none_budget_exhausted", ())
+    if len(text) <= max_chars:
+        return SelectedExcerpt(text, len(text), "full", (f"0:{len(text)}",))
+    if not query.strip():
+        return SelectedExcerpt(text[:max_chars], max_chars, "head", (f"0:{max_chars}",))
+
+    effective_chunk = max(500, min(int(chunk_chars), max_chars))
+    ranges = [
+        (start, min(start + effective_chunk, len(text)))
+        for start in range(0, len(text), effective_chunk)
+    ]
+    slots = max(1, (max_chars + effective_chunk - 1) // effective_chunk)
+    query_tokens = _search_tokens(query)
+    selected: set[int]
+    mode: str
+
+    if query_tokens:
+        scores: list[tuple[int, int]] = []
+        for index, (start, end) in enumerate(ranges):
+            chunk_tokens = _search_tokens(text[start:end])
+            scores.append((len(query_tokens.intersection(chunk_tokens)), index))
+        positive = [item for item in scores if item[0] > 0]
+        if positive:
+            ranked = [
+                index
+                for _, index in sorted(
+                    positive,
+                    key=lambda item: (item[0], -item[1]),
+                    reverse=True,
+                )
+            ]
+            selected = {0}
+            for index in ranked:
+                if len(selected) >= slots:
+                    break
+                selected.add(index)
+            for index in _distributed_indices(len(ranges), slots):
+                if len(selected) >= slots:
+                    break
+                selected.add(index)
+            mode = "query_retrieval"
+        else:
+            selected = set(_distributed_indices(len(ranges), slots))
+            mode = "overview_sample"
+    else:
+        selected = set(_distributed_indices(len(ranges), slots))
+        mode = "overview_sample"
+
+    remaining = max_chars
+    pieces: list[str] = []
+    selected_ranges: list[str] = []
+    provided_chars = 0
+    for index in sorted(selected):
+        if remaining <= 0:
+            break
+        start, end = ranges[index]
+        take = min(end - start, remaining)
+        if take <= 0:
+            continue
+        actual_end = start + take
+        pieces.append(text[start:actual_end])
+        selected_ranges.append(f"{start}:{actual_end}")
+        provided_chars += take
+        remaining -= take
+
+    return SelectedExcerpt(
+        text="\n[document excerpt gap]\n".join(pieces),
+        provided_chars=provided_chars,
+        selection_mode=mode,
+        selected_ranges=tuple(selected_ranges),
+    )
+
+
+def _attachment_priority(
+    attachment: Attachment,
+    *,
+    query_tokens: set[str],
+    focus_attachment_id: str | None,
+) -> tuple[int, int, str]:
+    focused = int(bool(focus_attachment_id and attachment.id == focus_attachment_id))
+    filename_score = len(query_tokens.intersection(_search_tokens(attachment.filename)))
+    reason = "focus_attachment" if focused else ("filename_query" if filename_score else "recent")
+    return focused, filename_score, reason
+
 
 
 def _safe_storage_path(settings: Settings, storage_key: str) -> Path:
@@ -241,35 +381,96 @@ def build_document_context(
     settings: Settings,
     tenant_id: str,
     thread_id: str,
+    query: str = "",
+    focus_attachment_id: str | None = None,
 ) -> DocumentContextBundle | None:
-    """Build document material plus truthful provenance for a canonical turn.
+    """Build bounded document material plus truthful provenance for a canonical turn.
 
     source_chars is measured after extraction/normalisation but before character
     context limits. provided_chars counts only actual source characters supplied
-    to the model; diagnostic marker text is excluded from that metric.
+    to the model; diagnostic and excerpt-gap marker text is excluded.
+
+    When a query or focus attachment is present, the current turn gets a bounded
+    candidate set ordered by explicit focus, filename relevance, then recency.
+    Legacy callers with neither query nor focus retain the historical oldest-first
+    source selection and head-excerpt behavior.
     """
     if not settings.document_context_enabled:
         return None
 
-    rows = db.scalars(
-        select(Attachment)
-        .where(
-            Attachment.tenant_id == tenant_id,
-            Attachment.thread_id == thread_id,
+    max_files = max(1, int(settings.document_context_max_files))
+    priority_reasons: dict[str, str] = {}
+
+    if query.strip() or focus_attachment_id:
+        candidate_limit = max(
+            max_files,
+            max(1, int(settings.document_context_candidate_files)),
         )
-        .order_by(Attachment.created_at.asc(), Attachment.id.asc())
-        .limit(settings.document_context_max_files)
-    ).all()
+        candidates = list(
+            db.scalars(
+                select(Attachment)
+                .where(
+                    Attachment.tenant_id == tenant_id,
+                    Attachment.thread_id == thread_id,
+                )
+                .order_by(Attachment.created_at.desc(), Attachment.id.desc())
+                .limit(candidate_limit)
+            ).all()
+        )
+
+        if focus_attachment_id and not any(
+            item.id == focus_attachment_id for item in candidates
+        ):
+            focused = db.scalar(
+                select(Attachment).where(
+                    Attachment.id == focus_attachment_id,
+                    Attachment.tenant_id == tenant_id,
+                    Attachment.thread_id == thread_id,
+                )
+            )
+            if focused is not None:
+                candidates.insert(0, focused)
+
+        query_tokens = _search_tokens(query)
+        decorated = [
+            (
+                *_attachment_priority(
+                    item,
+                    query_tokens=query_tokens,
+                    focus_attachment_id=focus_attachment_id,
+                ),
+                item,
+            )
+            for item in candidates
+        ]
+        # Python's sort is stable, so ties retain the newest-first candidate order.
+        decorated.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        rows = [item[3] for item in decorated[:max_files]]
+        priority_reasons = {item[3].id: item[2] for item in decorated}
+    else:
+        rows = db.scalars(
+            select(Attachment)
+            .where(
+                Attachment.tenant_id == tenant_id,
+                Attachment.thread_id == thread_id,
+            )
+            .order_by(Attachment.created_at.asc(), Attachment.id.asc())
+            .limit(max_files)
+        ).all()
+        priority_reasons = {item.id: "legacy_oldest" for item in rows}
+
     if not rows:
         return None
 
     remaining = max(0, int(settings.document_context_max_chars))
+    chunk_chars = max(500, int(settings.document_context_chunk_chars))
     blocks: list[str] = [
-        "DOCUMENT CONTEXT — successfully extracted document content supplied below is "
-        "available as source material for this turn. You may use the supplied content. "
+        "DOCUMENT CONTEXT — successfully extracted document excerpts supplied below are "
+        "available as source material for this turn. You may use the supplied excerpts. "
         "Do not claim that no document content is available when content is supplied. "
-        "Do not claim access to omitted or truncated portions, original file bytes, or "
-        "attachments whose extraction failed."
+        "Do not claim full-document review when a source is marked truncated or sampled. "
+        "Do not claim access to omitted portions, original file bytes, or attachments "
+        "whose extraction failed."
     ]
     errors: list[dict[str, str]] = []
     source_provenance: list[DocumentSourceProvenance] = []
@@ -296,12 +497,19 @@ def build_document_context(
             )
             source_chars = len(full_text)
             per_limit = max(0, int(settings.document_context_max_chars_per_file))
-            per_file_provided = full_text[:per_limit]
-            per_file_truncated = source_chars > len(per_file_provided)
+            per_file_target = min(source_chars, per_limit)
+            aggregate_target = min(per_file_target, remaining)
 
-            provided_text = per_file_provided[:remaining]
-            aggregate_cut_this_source = len(provided_text) < len(per_file_provided)
-            provided_chars = len(provided_text)
+            excerpt = _select_excerpt(
+                full_text,
+                query=query,
+                max_chars=aggregate_target,
+                chunk_chars=chunk_chars,
+            )
+            provided_text = excerpt.text
+            provided_chars = excerpt.provided_chars
+            per_file_truncated = source_chars > per_file_target
+            aggregate_cut_this_source = aggregate_target < per_file_target
 
             successful_sources += 1
             source_ids.append(attachment.id)
@@ -312,6 +520,7 @@ def build_document_context(
 
             content_sha = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
             source_truncated = per_file_truncated or aggregate_cut_this_source
+            priority_reason = priority_reasons.get(attachment.id, "recent")
             source_provenance.append(
                 DocumentSourceProvenance(
                     attachment_id=attachment.id,
@@ -321,6 +530,9 @@ def build_document_context(
                     provided_chars=provided_chars,
                     truncated=source_truncated,
                     content_sha256=content_sha,
+                    selection_mode=excerpt.selection_mode,
+                    selected_ranges=excerpt.selected_ranges,
+                    priority_reason=priority_reason,
                 )
             )
 
@@ -328,7 +540,9 @@ def build_document_context(
                 marker = _TRUNCATION_MARKER if source_truncated else ""
                 blocks.append(
                     f"\n--- attachment:{attachment.id} filename:{attachment.filename} "
-                    f"mime:{attachment.mime_type} ---\n{provided_text}{marker}"
+                    f"mime:{attachment.mime_type} selection:{excerpt.selection_mode} "
+                    f"ranges:{','.join(excerpt.selected_ranges)} ---\n"
+                    f"{provided_text}{marker}"
                 )
                 remaining -= provided_chars
 
@@ -348,6 +562,10 @@ def build_document_context(
                         "per_source_truncated": per_file_truncated,
                         "aggregate_truncated": aggregate_cut_this_source,
                         "truncated": source_truncated,
+                        "selection_mode": excerpt.selection_mode,
+                        "selected_ranges": list(excerpt.selected_ranges),
+                        "priority_reason": priority_reason,
+                        "query_used": bool(query.strip()),
                     },
                     sort_keys=True,
                 ),
@@ -393,7 +611,10 @@ def build_document_context(
 
     # A source successfully extracted after the aggregate limit is exhausted is still
     # evidence of aggregate truncation, even though it contributes zero model chars.
-    if successful_sources and any(item.provided_chars == 0 and item.source_chars > 0 for item in source_provenance):
+    if successful_sources and any(
+        item.provided_chars == 0 and item.source_chars > 0
+        for item in source_provenance
+    ):
         any_aggregate_truncated = True
 
     truncated = any_per_file_truncated or any_aggregate_truncated
@@ -434,6 +655,7 @@ def load_thread_documents(
     settings: Settings,
     tenant_id: str,
     thread_id: str,
+    query: str = "",
 ) -> tuple[list[ExtractedDocument], list[dict[str, str]]]:
     """Compatibility wrapper for existing callers/tests.
 
@@ -444,6 +666,7 @@ def load_thread_documents(
         settings=settings,
         tenant_id=tenant_id,
         thread_id=thread_id,
+        query=query,
     )
     if bundle is None:
         return [], []
@@ -482,11 +705,15 @@ def document_context_message(
     settings: Settings,
     tenant_id: str,
     thread_id: str,
+    query: str = "",
+    focus_attachment_id: str | None = None,
 ) -> dict | None:
     bundle = build_document_context(
         db,
         settings=settings,
         tenant_id=tenant_id,
         thread_id=thread_id,
+        query=query,
+        focus_attachment_id=focus_attachment_id,
     )
     return bundle.message if bundle is not None else None
