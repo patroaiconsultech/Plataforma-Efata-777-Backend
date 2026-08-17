@@ -74,8 +74,10 @@ class Settings(BaseSettings):
 
     document_context_enabled: bool = Field(True, alias="PLATFORM_DOCUMENT_CONTEXT_ENABLED")
     document_context_max_files: int = Field(6, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_FILES")
+    document_context_candidate_files: int = Field(24, alias="PLATFORM_DOCUMENT_CONTEXT_CANDIDATE_FILES")
     document_context_max_chars: int = Field(48_000, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_CHARS")
     document_context_max_chars_per_file: int = Field(20_000, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_CHARS_PER_FILE")
+    document_context_chunk_chars: int = Field(4_000, alias="PLATFORM_DOCUMENT_CONTEXT_CHUNK_CHARS")
     document_context_max_pdf_pages: int = Field(40, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_PDF_PAGES")
 
     github_enabled: bool = Field(False, alias="PLATFORM_GITHUB_INTEGRATION_ENABLED")

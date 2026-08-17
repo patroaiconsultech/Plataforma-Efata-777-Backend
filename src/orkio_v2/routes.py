@@ -140,6 +140,7 @@ def _history(
         settings=settings,
         tenant_id=tenant_id,
         thread_id=thread_id,
+        query=latest_user_content,
     )
     system_messages=list(extra_system_messages or [])
     if knowledge:
@@ -774,6 +775,7 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
 @router.get("/threads/{thread_id}/document-context")
 def document_context_provenance(
     thread_id: str,
+    focus_attachment_id: str | None = Query(None, max_length=64),
     p: Principal = Depends(require_provisioned_principal),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
@@ -786,6 +788,7 @@ def document_context_provenance(
         settings=settings,
         tenant_id=p.tenant_id,
         thread_id=thread_id,
+        focus_attachment_id=focus_attachment_id,
     )
     if bundle is None:
         return {
@@ -798,7 +801,7 @@ def document_context_provenance(
             "per_source_truncated": False,
             "aggregate_truncated": False,
             "truncated": False,
-            "context_version": "1.1",
+            "context_version": "2.0",
             "source_provenance": [],
         }
     prov = bundle.provenance
@@ -821,6 +824,9 @@ def document_context_provenance(
                 "source_chars": item.source_chars,
                 "provided_chars": item.provided_chars,
                 "truncated": item.truncated,
+                "selection_mode": item.selection_mode,
+                "selected_ranges": list(item.selected_ranges),
+                "priority_reason": item.priority_reason,
             }
             for item in prov.source_provenance
         ],
