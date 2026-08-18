@@ -245,7 +245,8 @@ def test_claimed_platform_owner_never_works_without_configured_owner_subject(cli
     )
     # Canonical DB admin may enter this route, but the untrusted platform_owner
     # claim must not appear as an effective role.
-    assert response.status_code == 200
+    assert response.status_code == 403
+    assert response.json()["detail"] == "ADMIN_ALLOWLIST_REQUIRED"
 
     with Testing() as db:
         principal = Principal(
@@ -276,7 +277,7 @@ def test_member_claimed_admin_is_denied_from_admin_route(client):
             headers=headers(roles="admin"),
         )
         assert response.status_code == 403
-        assert response.json()["detail"] == "ADMIN_ROLE_REQUIRED"
+        assert response.json()["detail"] == "ADMIN_ALLOWLIST_REQUIRED"
     finally:
         with Testing() as db:
             membership = db.query(Membership).filter_by(

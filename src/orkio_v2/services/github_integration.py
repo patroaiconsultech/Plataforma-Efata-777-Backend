@@ -23,7 +23,7 @@ _SAFE_EXACT_NAMES = {
     "Dockerfile", "Makefile", "Procfile", ".dockerignore", ".gitignore",
 }
 _SECRET_NAME_RE = re.compile(
-    r"(^|/)(?:\\.env(?:\\.|$)|.*(?:secret|credential|private[_-]?key|id_rsa|id_ed25519).*)",
+    r"(^|/)(?:\.env(?:\.|$)|.*(?:secret|credential|private[_-]?key|id_rsa|id_ed25519).*)",
     re.IGNORECASE,
 )
 

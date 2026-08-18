@@ -15,6 +15,19 @@ from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..models import Attachment
+from .document_ingestion_security import (
+    ArchiveMemberTooLarge,
+    ArchiveRequiredMemberInvalid,
+    DocumentIngestionSecurityError,
+    DocumentIngestionSecurityPolicy,
+    InvalidXml,
+    UnsafeXmlRejected,
+    ArchiveSecurityLimits,
+    default_document_ingestion_policy,
+    inspect_zip_archive,
+    parse_untrusted_xml,
+    read_zip_member_bounded,
+)
 
 
 class DocumentContextError(RuntimeError):
@@ -92,6 +105,28 @@ _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.doc
 document_context_logger = logging.getLogger("uvicorn.error")
 
 
+def _ingestion_policy_from_settings(settings: Settings) -> DocumentIngestionSecurityPolicy:
+    return DocumentIngestionSecurityPolicy(
+        archive=ArchiveSecurityLimits(
+            max_entries=settings.document_ingestion_max_archive_entries,
+            max_total_uncompressed_bytes=settings.document_ingestion_max_total_uncompressed_bytes,
+            max_member_uncompressed_bytes=settings.document_ingestion_max_member_bytes,
+        ),
+        docx_max_xml_bytes=settings.document_ingestion_docx_max_xml_bytes,
+    )
+
+
+def _security_error_details(exc: DocumentContextError) -> dict[str, int | float | str]:
+    details: dict[str, int | float | str] = {
+        "ingestion_security_event": "document_ingestion_rejected",
+        "error_code": str(exc) or exc.code,
+    }
+    cause = exc.__cause__
+    if isinstance(cause, DocumentIngestionSecurityError):
+        details.update(cause.safe_details())
+    return details
+
+
 def _safe_storage_path(settings: Settings, storage_key: str) -> Path:
     root = Path(settings.artifact_storage_path).resolve()
     target = (root / storage_key).resolve()
@@ -141,16 +176,35 @@ def _extract_text_plain(raw: bytes, *, mime_type: str) -> str:
     return text
 
 
-def _extract_docx(raw: bytes) -> str:
+def _extract_docx(
+    raw: bytes,
+    *,
+    ingestion_policy: DocumentIngestionSecurityPolicy,
+) -> str:
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            xml = archive.read("word/document.xml")
-    except (zipfile.BadZipFile, KeyError) as exc:
+            inspect_zip_archive(
+                archive,
+                limits=ingestion_policy.archive,
+                required_members=("word/document.xml",),
+            )
+            xml = read_zip_member_bounded(
+                archive,
+                "word/document.xml",
+                max_bytes=ingestion_policy.docx_max_xml_bytes,
+            )
+    except ArchiveMemberTooLarge as exc:
+        raise DocumentIntegrityError("DOCUMENT_DOCX_XML_TOO_LARGE") from exc
+    except (DocumentIngestionSecurityError, zipfile.BadZipFile, KeyError) as exc:
         raise DocumentExtractionFailed("DOCUMENT_DOCX_INVALID") from exc
+
     try:
-        root = ET.fromstring(xml)
-    except ET.ParseError as exc:
+        root = parse_untrusted_xml(xml)
+    except UnsafeXmlRejected as exc:
+        raise DocumentExtractionFailed("DOCUMENT_DOCX_XML_UNSAFE") from exc
+    except InvalidXml as exc:
         raise DocumentExtractionFailed("DOCUMENT_DOCX_XML_INVALID") from exc
+
     namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     paragraphs: list[str] = []
     for paragraph in root.iter(namespace + "p"):
@@ -184,13 +238,15 @@ def _extract_document_text_unbounded(
     mime_type: str,
     raw: bytes,
     max_pdf_pages: int,
+    ingestion_policy: DocumentIngestionSecurityPolicy | None = None,
 ) -> str:
     del filename  # filename is retained in the public signature for auditability/future adapters.
     _validate_magic(mime_type, raw)
+    policy = ingestion_policy or default_document_ingestion_policy()
     if mime_type in _TEXT_MIME_TYPES:
         text = _extract_text_plain(raw, mime_type=mime_type)
     elif mime_type == _DOCX_MIME:
-        text = _extract_docx(raw)
+        text = _extract_docx(raw, ingestion_policy=policy)
     elif mime_type == _PDF_MIME:
         text = _extract_pdf(raw, max_pages=max_pdf_pages)
     else:
@@ -209,6 +265,7 @@ def extract_document_text(
     raw: bytes,
     max_chars: int,
     max_pdf_pages: int,
+    ingestion_policy: DocumentIngestionSecurityPolicy | None = None,
 ) -> str:
     """Backward-compatible extraction API.
 
@@ -221,6 +278,7 @@ def extract_document_text(
         mime_type=mime_type,
         raw=raw,
         max_pdf_pages=max_pdf_pages,
+        ingestion_policy=ingestion_policy,
     )
     if len(text) > max_chars:
         return text[:max_chars].rstrip() + _TRUNCATION_MARKER
@@ -293,6 +351,7 @@ def build_document_context(
                 mime_type=attachment.mime_type,
                 raw=raw,
                 max_pdf_pages=settings.document_context_max_pdf_pages,
+                ingestion_policy=_ingestion_policy_from_settings(settings),
             )
             source_chars = len(full_text)
             per_limit = max(0, int(settings.document_context_max_chars_per_file))

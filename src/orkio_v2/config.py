@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     document_context_max_chars: int = Field(48_000, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_CHARS")
     document_context_max_chars_per_file: int = Field(20_000, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_CHARS_PER_FILE")
     document_context_max_pdf_pages: int = Field(40, alias="PLATFORM_DOCUMENT_CONTEXT_MAX_PDF_PAGES")
+    document_ingestion_max_archive_entries: int = Field(512, alias="PLATFORM_DOCUMENT_INGESTION_MAX_ARCHIVE_ENTRIES")
+    document_ingestion_max_total_uncompressed_bytes: int = Field(64_000_000, alias="PLATFORM_DOCUMENT_INGESTION_MAX_TOTAL_UNCOMPRESSED_BYTES")
+    document_ingestion_max_member_bytes: int = Field(16_000_000, alias="PLATFORM_DOCUMENT_INGESTION_MAX_MEMBER_BYTES")
+    document_ingestion_docx_max_xml_bytes: int = Field(2_000_000, alias="PLATFORM_DOCUMENT_INGESTION_DOCX_MAX_XML_BYTES")
 
     github_enabled: bool = Field(False, alias="PLATFORM_GITHUB_INTEGRATION_ENABLED")
     github_read_only: bool = Field(True, alias="PLATFORM_GITHUB_READ_ONLY")
@@ -157,6 +161,17 @@ class Settings(BaseSettings):
             ]
             if not all(required):
                 raise ValueError("OIDC_CONFIGURATION_INCOMPLETE")
+        if (
+            self.document_ingestion_max_archive_entries < 1
+            or self.document_ingestion_max_total_uncompressed_bytes < 1
+            or self.document_ingestion_max_member_bytes < 1
+            or self.document_ingestion_docx_max_xml_bytes < 1
+            or self.document_ingestion_max_member_bytes
+            > self.document_ingestion_max_total_uncompressed_bytes
+            or self.document_ingestion_docx_max_xml_bytes
+            > self.document_ingestion_max_member_bytes
+        ):
+            raise ValueError("DOCUMENT_INGESTION_LIMIT_RELATION_INVALID")
         if self.access_gate_ttl_seconds < 60 or self.access_gate_ttl_seconds > 3600:
             raise ValueError("ACCESS_GATE_TTL_INVALID")
         if self.access_gate_enabled:

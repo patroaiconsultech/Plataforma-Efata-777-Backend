@@ -35,13 +35,13 @@ def test_ready_rejects_migration_mismatch(client):
         assert response.status_code == 503
         body = response.json()["detail"]
         assert body["checks"]["migration_current"] is False
-        assert body["checks"]["migration_expected"] == "001_v2_foundation"
+        assert body["checks"]["migration_expected"] == "002_hyper_cocreator"
     finally:
         with engine.begin() as connection:
             connection.execute(
                 text(
                     "UPDATE alembic_version "
-                    "SET version_num='001_v2_foundation'"
+                    "SET version_num='002_hyper_cocreator'"
                 )
             )
 
