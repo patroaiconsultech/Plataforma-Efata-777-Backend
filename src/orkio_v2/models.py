@@ -154,3 +154,36 @@ class AuditEvent(Base):
     outcome: Mapped[str] = mapped_column(String(30))
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class UserExperienceProfile(Base):
+    __tablename__ = "user_experience_profiles"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "user_id", name="uq_user_experience_profile_tenant_user"),
+    )
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    co_creator_name: Mapped[str] = mapped_column(String(64), default="Co-Criador")
+    onboarding_goal: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, onupdate=now
+    )
+
+
+class AccessGrantRedemption(Base):
+    __tablename__ = "access_grant_redemptions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    grant_jti: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

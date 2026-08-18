@@ -68,6 +68,16 @@ class Settings(BaseSettings):
     invitation_ttl_hours: int = Field(72, alias="PLATFORM_INVITATION_TTL_HOURS")
     invitation_base_url: str = Field("http://localhost:5173/invite", alias="PLATFORM_INVITATION_BASE_URL")
 
+    access_gate_enabled: bool = Field(False, alias="PLATFORM_ACCESS_GATE_ENABLED")
+    access_gate_code_hashes: str = Field("", alias="PLATFORM_ACCESS_GATE_CODE_HASHES")
+    access_gate_signing_secret: str = Field("", alias="PLATFORM_ACCESS_GATE_SIGNING_SECRET")
+    access_gate_tenant_id: str = Field("", alias="PLATFORM_ACCESS_GATE_TENANT_ID")
+    access_gate_ttl_seconds: int = Field(600, alias="PLATFORM_ACCESS_GATE_TTL_SECONDS")
+    admin_email_allowlist: str = Field(
+        "daniel@patroai.com,patroaiconsultech@gmail.com",
+        alias="PLATFORM_ADMIN_EMAIL_ALLOWLIST",
+    )
+
     artifacts_enabled: bool = Field(False, alias="PLATFORM_ARTIFACTS_ENABLED")
     artifact_storage_path: str = Field("./data/artifacts", alias="PLATFORM_ARTIFACT_STORAGE_PATH")
     max_upload_bytes: int = Field(10_000_000, alias="PLATFORM_MAX_UPLOAD_BYTES")
@@ -147,6 +157,30 @@ class Settings(BaseSettings):
             ]
             if not all(required):
                 raise ValueError("OIDC_CONFIGURATION_INCOMPLETE")
+        if self.access_gate_ttl_seconds < 60 or self.access_gate_ttl_seconds > 3600:
+            raise ValueError("ACCESS_GATE_TTL_INVALID")
+        if self.access_gate_enabled:
+            hashes = [
+                item.strip().lower()
+                for item in self.access_gate_code_hashes.split(",")
+                if item.strip()
+            ]
+            if not hashes or any(
+                len(item) != 64 or any(ch not in "0123456789abcdef" for ch in item)
+                for item in hashes
+            ):
+                raise ValueError("ACCESS_GATE_CODE_HASHES_INVALID")
+            if len(self.access_gate_signing_secret) < 32:
+                raise ValueError("ACCESS_GATE_SIGNING_SECRET_TOO_SHORT")
+            if self.environment == "production" and not self.access_gate_tenant_id.strip():
+                raise ValueError("ACCESS_GATE_TENANT_ID_REQUIRED_IN_PRODUCTION")
+        admin_emails = [
+            item.strip().lower()
+            for item in self.admin_email_allowlist.split(",")
+            if item.strip()
+        ]
+        if not admin_emails or any("@" not in item for item in admin_emails):
+            raise ValueError("ADMIN_EMAIL_ALLOWLIST_INVALID")
         if not self.github_read_only:
             raise ValueError("GITHUB_WRITE_MODE_FORBIDDEN")
         if self.github_enabled and not self.github_allowed_repositories.strip():

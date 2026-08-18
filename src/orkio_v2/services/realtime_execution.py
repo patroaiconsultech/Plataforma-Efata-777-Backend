@@ -9,6 +9,7 @@ from ..runtime.contracts import RuntimeChannel
 from . import llm
 from .direct_runtime import build_turn as build_direct_turn, persist_agent_response
 from .execution_router import resolve_direct_target_decision
+from .hyper_cocreator import hyper_cocreator_system_message, profile_for
 from .team_runtime import (
     build_team_plan,
     build_team_turn,
@@ -101,6 +102,19 @@ async def execute_realtime_direct(
             tenant_id=tenant_id,
             settings=settings,
         )
+        if turn.turn_owner_agent_id == "orkio":
+            profile = profile_for(
+                db,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+            history.insert(
+                0,
+                hyper_cocreator_system_message(
+                    co_creator_name=profile.co_creator_name if profile else None,
+                    onboarding_goal=profile.onboarding_goal if profile else None,
+                ),
+            )
     except Exception as exc:
         raise _unexpected_execution_error(stage="history", exc=exc, turn=turn) from exc
 

@@ -16,6 +16,15 @@ from .services.identity import (
     require_known_principal,
     assert_provisioned,
 )
+from .services.hyper_cocreator import (
+    AccessGateError,
+    complete_onboarding,
+    hyper_cocreator_system_message,
+    is_allowlisted_admin,
+    profile_for,
+    require_allowlisted_admin_principal,
+    validate_access_code,
+)
 from .services import llm
 from .services.document_context import build_document_context, document_context_message
 from .services.artifact_context import artifact_context_message
@@ -61,6 +70,132 @@ from .services.external_read_tool import ExternalReadError, read_external_url
 
 router=APIRouter(prefix="/api/v2")
 artifact_gate_logger=logging.getLogger("orkio.artifact_gate")
+
+
+@router.post("/access/validate")
+def validate_platform_access(
+    payload: AccessCodeValidateRequest,
+    settings: Settings = Depends(get_settings),
+):
+    """Exchange a private access code for a short-lived signed onboarding grant.
+
+    Raw codes are never returned or persisted here. Production configuration stores
+    only SHA-256 digests via PLATFORM_ACCESS_GATE_CODE_HASHES.
+    """
+    try:
+        grant = validate_access_code(settings, payload.code)
+    except AccessGateError as exc:
+        status = 503 if exc.code == "ACCESS_GATE_DISABLED" else 403
+        raise HTTPException(status, exc.code) from exc
+    return {
+        "grant": grant.token,
+        "expires_at": grant.expires_at,
+        "onboarding_required": True,
+    }
+
+
+@router.post("/onboarding/complete")
+def complete_hyper_cocreator_onboarding(
+    payload: HyperCocreatorOnboardingComplete,
+    p: Principal = Depends(require_principal),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    """Provision the authenticated OIDC identity and persist the UX profile.
+
+    Passwords are owned by the configured identity provider; this API never receives
+    or stores application passwords.
+    """
+    try:
+        profile = complete_onboarding(
+            db,
+            settings=settings,
+            principal=p,
+            grant_token=payload.grant,
+            co_creator_name=payload.co_creator_name,
+            onboarding_goal=payload.onboarding_goal,
+        )
+    except AccessGateError as exc:
+        status = 409 if exc.code in {
+            "ACCESS_GRANT_ALREADY_USED",
+            "ACCESS_IDENTITY_CONFLICT",
+            "ACCESS_ONBOARDING_CONFLICT",
+        } else 403
+        raise HTTPException(status, exc.code) from exc
+    return {
+        "status": "provisioned",
+        "user_id": p.user_id,
+        "tenant_id": p.tenant_id,
+        "co_creator_name": profile.co_creator_name,
+        "onboarding_goal": profile.onboarding_goal,
+    }
+
+
+@router.get("/me")
+def me(
+    p: Principal = Depends(require_provisioned_principal),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    profile = profile_for(db, tenant_id=p.tenant_id, user_id=p.user_id)
+    return {
+        "user_id": p.user_id,
+        "tenant_id": p.tenant_id,
+        "email": p.email,
+        "roles": list(p.roles),
+        "admin_access": is_allowlisted_admin(p, settings),
+        "co_creator_name": (
+            profile.co_creator_name if profile else "Co-Criador"
+        ),
+        "onboarding_goal": profile.onboarding_goal if profile else None,
+    }
+
+
+@router.get("/admin/overview")
+def admin_overview(
+    p: Principal = Depends(require_provisioned_principal),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    require_allowlisted_admin_principal(p, settings)
+    return {
+        "tenant_id": p.tenant_id,
+        "users": int(
+            db.scalar(
+                select(func.count(Membership.id)).where(
+                    Membership.tenant_id == p.tenant_id,
+                    Membership.active.is_(True),
+                )
+            )
+            or 0
+        ),
+        "threads": int(
+            db.scalar(
+                select(func.count(Thread.id)).where(
+                    Thread.tenant_id == p.tenant_id
+                )
+            )
+            or 0
+        ),
+        "messages": int(
+            db.scalar(
+                select(func.count(Message.id)).where(
+                    Message.tenant_id == p.tenant_id
+                )
+            )
+            or 0
+        ),
+        "co_creator_profiles": int(
+            db.scalar(
+                select(func.count(UserExperienceProfile.id)).where(
+                    UserExperienceProfile.tenant_id == p.tenant_id
+                )
+            )
+            or 0
+        ),
+        "environment": settings.environment,
+        "release_sha": settings.release_sha,
+    }
 
 @router.get("/agents")
 def agents_catalog(
@@ -159,7 +294,7 @@ def _history(
 def health(settings: Settings=Depends(get_settings)):
     return {"status":"ok","release":"2.0.0a1","sha":settings.release_sha,"environment":settings.environment}
 
-EXPECTED_MIGRATION_HEAD = "001_v2_foundation"
+EXPECTED_MIGRATION_HEAD = "002_hyper_cocreator"
 
 
 @router.get("/ready")
@@ -424,21 +559,40 @@ async def send_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(r
 
     user=Message(tenant_id=p.tenant_id,thread_id=thread_id,author_type="user",author_id=p.user_id,content=payload.content)
     db.add(user); db.commit()
-    github_messages = await github_context_messages(
-        settings,
-        message=payload.content,
-        is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
+    hyper_surface = execution.resolved_target == "orkio"
+    profile = (
+        profile_for(db, tenant_id=p.tenant_id, user_id=p.user_id)
+        if hyper_surface
+        else None
+    )
+    github_messages = (
+        []
+        if hyper_surface
+        else await github_context_messages(
+            settings,
+            message=payload.content,
+            is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
+        )
     )
     capability_messages = await runtime_capability_messages(
         message=payload.content,
         roles=p.roles,
     )
+    runtime_system_messages = list(github_messages) + list(capability_messages)
+    if hyper_surface:
+        runtime_system_messages.insert(
+            0,
+            hyper_cocreator_system_message(
+                co_creator_name=profile.co_creator_name if profile else None,
+                onboarding_goal=profile.onboarding_goal if profile else None,
+            ),
+        )
     history=_history(
         db,
         thread_id,
         p.tenant_id,
         settings,
-        extra_system_messages=list(github_messages) + list(capability_messages),
+        extra_system_messages=runtime_system_messages,
     )
 
     try:
@@ -540,16 +694,34 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
     if configured:
         db.add(Message(tenant_id=tenant_id,thread_id=thread_id,author_type="user",author_id=user_id,content=payload.content))
         db.commit()
-        github_messages = await github_context_messages(
-            settings,
-            message=payload.content,
-            is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
+        hyper_surface = execution.resolved_target == "orkio"
+        profile = (
+            profile_for(db, tenant_id=tenant_id, user_id=user_id)
+            if hyper_surface
+            else None
+        )
+        github_messages = (
+            []
+            if hyper_surface
+            else await github_context_messages(
+                settings,
+                message=payload.content,
+                is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
+            )
         )
         capability_messages = await runtime_capability_messages(
             message=payload.content,
             roles=p.roles,
         )
         runtime_system_messages = list(github_messages) + list(capability_messages)
+        if hyper_surface:
+            runtime_system_messages.insert(
+                0,
+                hyper_cocreator_system_message(
+                    co_creator_name=profile.co_creator_name if profile else None,
+                    onboarding_goal=profile.onboarding_goal if profile else None,
+                ),
+            )
         if artifact_allowed and artifact_intent is not None:
             runtime_system_messages.append(
                 artifact_generation_system_message(artifact_intent)
@@ -890,6 +1062,10 @@ def create_proposal(payload:EvolutionProposalCreate,p:Principal=Depends(require_
             "write_executed":False,"commit_executed":False,"merge_executed":False,"deploy_executed":False}
 
 @router.get("/admin/security/status")
-def security_status(p:Principal=Depends(require_provisioned_admin),settings:Settings=Depends(get_settings)):
+def security_status(
+    p: Principal = Depends(require_provisioned_principal),
+    settings: Settings = Depends(get_settings),
+):
+    require_allowlisted_admin_principal(p, settings)
     return {"auth_mode":settings.auth_mode,"demo_headers_enabled":settings.demo_headers_enabled,
             "github_read_only":settings.github_read_only,"evolution_execution_allowed":settings.evolution_execution_allowed}
