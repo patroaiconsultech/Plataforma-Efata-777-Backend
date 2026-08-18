@@ -88,6 +88,12 @@ def _code_hashes(settings: Settings) -> tuple[str, ...]:
 def validate_access_code(settings: Settings, code: str) -> AccessGrant:
     if not settings.access_gate_enabled:
         raise AccessGateError("ACCESS_GATE_DISABLED")
+    if (
+        len(settings.access_gate_signing_secret) < 32
+        or not _code_hashes(settings)
+        or not settings.access_gate_tenant_id.strip()
+    ):
+        raise AccessGateError("ACCESS_GATE_NOT_CONFIGURED")
     digest = hmac.new(
         settings.access_gate_signing_secret.encode("utf-8"),
         code.strip().lower().encode("utf-8"),
@@ -286,6 +292,33 @@ def profile_for(
             UserExperienceProfile.user_id == user_id,
         )
     )
+
+
+
+def update_profile_name(
+    db: Session,
+    *,
+    principal: Principal,
+    co_creator_name: str,
+) -> UserExperienceProfile:
+    """Rename the current user's visible Co-Creator without changing canonical ownership."""
+    profile = profile_for(
+        db,
+        tenant_id=principal.tenant_id,
+        user_id=principal.user_id,
+    )
+    if profile is None:
+        profile = UserExperienceProfile(
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+            co_creator_name=_safe_cocreator_name(co_creator_name),
+        )
+        db.add(profile)
+    else:
+        profile.co_creator_name = _safe_cocreator_name(co_creator_name)
+    db.commit()
+    db.refresh(profile)
+    return profile
 
 
 def hyper_cocreator_system_message(

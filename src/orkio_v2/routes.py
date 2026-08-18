@@ -23,6 +23,7 @@ from .services.hyper_cocreator import (
     is_allowlisted_admin,
     profile_for,
     require_allowlisted_admin_principal,
+    update_profile_name,
     validate_access_code,
 )
 from .services import llm
@@ -148,6 +149,24 @@ def me(
             profile.co_creator_name if profile else "Co-Criador"
         ),
         "onboarding_goal": profile.onboarding_goal if profile else None,
+    }
+
+
+@router.patch("/me/co-creator")
+def rename_hyper_cocreator(
+    payload: HyperCocreatorProfileUpdate,
+    p: Principal = Depends(require_provisioned_principal),
+    db: Session = Depends(get_db),
+):
+    profile = update_profile_name(
+        db,
+        principal=p,
+        co_creator_name=payload.co_creator_name,
+    )
+    return {
+        "status": "updated",
+        "co_creator_name": profile.co_creator_name,
+        "onboarding_goal": profile.onboarding_goal,
     }
 
 
@@ -1067,5 +1086,15 @@ def security_status(
     settings: Settings = Depends(get_settings),
 ):
     require_allowlisted_admin_principal(p, settings)
-    return {"auth_mode":settings.auth_mode,"demo_headers_enabled":settings.demo_headers_enabled,
-            "github_read_only":settings.github_read_only,"evolution_execution_allowed":settings.evolution_execution_allowed}
+    return {
+        "auth_mode": settings.auth_mode,
+        "demo_headers_enabled": settings.demo_headers_enabled,
+        "github_read_only": settings.github_read_only,
+        "evolution_execution_allowed": settings.evolution_execution_allowed,
+        "access_gate_enabled": settings.access_gate_enabled,
+        "access_gate_code_hash_count": len([
+            item for item in settings.access_gate_code_hashes.split(",") if item.strip()
+        ]),
+        "access_gate_tenant_configured": bool(settings.access_gate_tenant_id.strip()),
+        "access_gate_signing_secret_configured": len(settings.access_gate_signing_secret) >= 32,
+    }

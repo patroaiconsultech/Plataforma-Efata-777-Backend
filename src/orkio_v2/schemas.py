@@ -57,3 +57,7 @@ class HyperCocreatorOnboardingComplete(BaseModel):
     grant: str = Field(min_length=32, max_length=4096)
     co_creator_name: str = Field(min_length=2, max_length=64)
     onboarding_goal: str | None = Field(default=None, max_length=240)
+
+
+class HyperCocreatorProfileUpdate(BaseModel):
+    co_creator_name: str = Field(min_length=2, max_length=64)
