@@ -19,7 +19,8 @@ dependencies = [
   "cryptography>=43,<46",
   "python-multipart>=0.0.12,<1",
   "pypdf>=5.0,<7",
-  "email-validator>=2.2,<3"
+  "email-validator>=2.2,<3",
+  "defusedxml>=0.7.1,<1"
 ]
 
 [project.optional-dependencies]
