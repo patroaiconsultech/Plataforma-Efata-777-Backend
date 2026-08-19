@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from orkio_v2.services.realtime_bridge import (
     RealtimeBridgeError,
     realtime_turn_key,
@@ -164,3 +166,18 @@ def test_realtime_duplicate_final_transcript_reconciles_without_second_execution
     assert second.json()["reconciled"] is True
     assert second.json()["message_id"] == first.json()["message_id"]
     assert executions["count"] == 1
+
+
+def test_realtime_session_hardens_noisy_microphone_input():
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "orkio_v2"
+        / "services"
+        / "realtime_session.py"
+    ).read_text(encoding="utf-8")
+    assert '"noise_reduction": {' in source
+    assert '"type": "far_field"' in source
+    assert '"threshold": 0.7' in source
+    assert '"prefix_padding_ms": 300' in source
+    assert '"silence_duration_ms": 700' in source

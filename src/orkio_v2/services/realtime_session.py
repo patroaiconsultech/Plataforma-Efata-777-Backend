@@ -167,12 +167,18 @@ async def create_realtime_call(
         "output_modalities": ["text"],
         "audio": {
             "input": {
+                "noise_reduction": {
+                    "type": "far_field",
+                },
                 "transcription": {
                     "model": settings.realtime_transcription_model,
                     "language": _transcription_language(locale),
                 },
                 "turn_detection": {
                     "type": "server_vad",
+                    "threshold": 0.7,
+                    "prefix_padding_ms": 300,
+                    "silence_duration_ms": 700,
                     "create_response": False,
                     "interrupt_response": False,
                 },
