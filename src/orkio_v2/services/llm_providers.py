@@ -20,6 +20,7 @@ from .llm_contracts import (
     ProviderName,
     agent_system_prompt,
     split_system_and_history,
+    system_prompt_for_history,
 )
 
 
@@ -49,7 +50,7 @@ def openai_endpoint(settings: Settings) -> str:
 
 
 def openai_payload(settings: Settings, agent: str, history: list[dict], stream: bool) -> dict:
-    messages = [{"role": "system", "content": agent_system_prompt(agent)}]
+    messages = [{"role": "system", "content": system_prompt_for_history(agent, history)}]
     messages.extend(history)
     return {
         "model": settings.openai_model,

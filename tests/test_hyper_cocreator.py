@@ -12,6 +12,8 @@ from orkio_v2.services.hyper_cocreator import (
     validate_access_code,
     verify_access_grant,
 )
+from orkio_v2.services.llm_contracts import split_system_and_history
+from orkio_v2.services.llm_providers import openai_payload
 
 
 SECRET = "test-access-gate-signing-secret-32chars"
@@ -80,3 +82,43 @@ def test_hyper_cocreator_prompt_preserves_canonical_owner_and_blocks_platform_ev
     for forbidden in ("commit", "merge", "deploy", "migrate", "GitHub"):
         assert forbidden.lower() in message.lower()
     assert "restricted" in message.lower() or "restrit" in message.lower()
+
+
+def test_hyper_cocreator_provider_prompts_do_not_reintroduce_legacy_orkio_identity():
+    cfg = settings(
+        OPENAI_API_KEY="test-key",
+        OPENAI_MODEL="gpt-5",
+    )
+    hyper = hyper_cocreator_system_message(
+        co_creator_name="Dani",
+        onboarding_goal=None,
+    )
+    history = [hyper, {"role": "user", "content": "Com quem eu falo?"}]
+
+    payload = openai_payload(cfg, "orkio", history, stream=False)
+    base_system = payload["messages"][0]["content"]
+    assert "Dani" not in base_system
+    assert "Josué" not in base_system
+    assert "Chief Executive Officer" not in base_system
+    assert payload["messages"][1]["content"].startswith("HYPER CO-CREATOR MODE")
+    assert "Visible co-creator name for this user: Dani." in payload["messages"][1]["content"]
+
+    combined_system, normalized = split_system_and_history("orkio", history)
+    assert "Visible co-creator name for this user: Dani." in combined_system
+    assert "Seu nome nesta conversa é Josué." not in combined_system
+    assert "Nome: Josué" not in combined_system
+    assert normalized == [{"role": "user", "content": "Com quem eu falo?"}]
+
+
+def test_direct_non_hyper_orkio_prompt_keeps_catalog_identity_contract():
+    cfg = settings(
+        OPENAI_API_KEY="test-key",
+        OPENAI_MODEL="gpt-5",
+    )
+    payload = openai_payload(
+        cfg,
+        "orkio",
+        [{"role": "user", "content": "teste"}],
+        stream=False,
+    )
+    assert "Seu nome nesta conversa é Josué." in payload["messages"][0]["content"]
