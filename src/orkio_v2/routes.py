@@ -221,6 +221,10 @@ def agents_catalog(
     p: Principal = Depends(require_provisioned_principal),
     settings: Settings = Depends(get_settings),
 ):
+    admin = bool({"admin", "orkio_admin"}.intersection(p.roles))
+    catalog = list_agents()
+    if not admin:
+        catalog = tuple(agent for agent in catalog if agent.slug.lower() == "orkio")
     return [{
         "slug": a.slug,
         "canonical_name": a.canonical_name,
@@ -234,7 +238,7 @@ def agents_catalog(
         "localized_role_labels": dict(a.localized_role_labels),
         "target_kind": a.target_kind.value,
         "availability": availability_for(a, settings).to_dict(),
-    } for a in list_agents()]
+    } for a in catalog]
 
 
 @router.get("/agents/by-id/{agent_id}/readiness")
@@ -260,6 +264,12 @@ def _resolve_target_or_404(requested_target: str, settings: Settings):
         ) from exc
     except TargetNotFound as exc:
         raise HTTPException(404, detail={"code": exc.code}) from exc
+
+
+def _effective_agent_target(requested_target: str, p: Principal) -> str:
+    if {"admin", "orkio_admin"}.intersection(p.roles):
+        return requested_target
+    return "orkio"
 
 INVITE_ALLOWED_ROLES={ThreadRole.owner.value, ThreadRole.moderator.value}
 
@@ -515,6 +525,25 @@ def create_thread(payload: ThreadCreate, p: Principal=Depends(require_provisione
     db.commit()
     return {"id":thread.id,"title":thread.title}
 
+@router.patch("/threads/{thread_id}")
+def update_thread_title(
+    thread_id: str,
+    payload: ThreadTitleUpdate,
+    p: Principal = Depends(require_provisioned_principal),
+    db: Session = Depends(get_db),
+):
+    thread, member = thread_access(db, thread_id, p)
+    if member.thread_role not in INVITE_ALLOWED_ROLES:
+        raise HTTPException(403, "THREAD_RENAME_ROLE_REQUIRED")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(422, "THREAD_TITLE_REQUIRED")
+    thread.title = title
+    db.add(thread)
+    db.commit()
+    db.refresh(thread)
+    return {"id": thread.id, "title": thread.title}
+
 @router.get("/threads")
 def list_threads(p: Principal=Depends(require_provisioned_principal), db: Session=Depends(get_db),
                  limit: int=Query(50, ge=1, le=200), offset: int=Query(0, ge=0)):
@@ -557,7 +586,8 @@ async def send_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(r
                        settings:Settings=Depends(get_settings),db:Session=Depends(get_db)):
     _,member=thread_access(db,thread_id,p)
     if member.thread_role==ThreadRole.viewer.value: raise HTTPException(403,"THREAD_READ_ONLY")
-    decision=_resolve_target_or_404(payload.agent, settings)
+    effective_agent = _effective_agent_target(payload.agent, p)
+    decision=_resolve_target_or_404(effective_agent, settings)
     execution=decision.execution
     availability=decision.availability
     turn=build_direct_turn(
@@ -565,7 +595,7 @@ async def send_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(r
         thread_id=thread_id,
         tenant_id=p.tenant_id,
         user_id=p.user_id,
-        requested_target=payload.agent,
+        requested_target=effective_agent,
         channel=RuntimeChannel.CHAT_JSON,
     )
     observer=ExecutionObserver.from_turn(turn,execution_engine=execution.execution_engine.value)
@@ -661,7 +691,8 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
     _,member=thread_access(db,thread_id,p)
     if member.thread_role==ThreadRole.viewer.value: raise HTTPException(403,"THREAD_READ_ONLY")
     if not settings.realtime_streaming_enabled: raise HTTPException(403,"REALTIME_STREAMING_DISABLED")
-    decision=_resolve_target_or_404(payload.agent, settings)
+    effective_agent = _effective_agent_target(payload.agent, p)
+    decision=_resolve_target_or_404(effective_agent, settings)
     execution=decision.execution
     availability=decision.availability
     turn=build_direct_turn(
@@ -669,7 +700,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
         thread_id=thread_id,
         tenant_id=p.tenant_id,
         user_id=p.user_id,
-        requested_target=payload.agent,
+        requested_target=effective_agent,
         channel=RuntimeChannel.CHAT_SSE,
     )
 
@@ -696,7 +727,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
                     "event": "artifact_gate_evaluated",
                     "execution_id": turn.execution_id,
                     "thread_id": thread_id,
-                    "requested_agent": payload.agent,
+                    "requested_agent": effective_agent,
                     "resolved_agent": turn.resolved_agent_id,
                     "requested_format": artifact_intent.requested_format,
                     "artifacts_enabled": bool(settings.artifacts_enabled),
@@ -927,14 +958,26 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
     if not member.can_upload_files: raise HTTPException(403,"UPLOAD_PERMISSION_REQUIRED")
     data=await file.read(settings.max_upload_bytes+1)
     if len(data)>settings.max_upload_bytes: raise HTTPException(413,"FILE_TOO_LARGE")
-    allowed={"application/pdf","text/plain","text/csv","application/json",
+    allowed={"application/pdf","text/plain","text/csv","text/markdown","application/json",
              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
              "application/vnd.openxmlformats-officedocument.presentationml.presentation"}
-    if file.content_type not in allowed: raise HTTPException(415,"MIME_TYPE_NOT_ALLOWED")
     digest=hashlib.sha256(data).hexdigest()
     safe=PurePosixPath((file.filename or "file").replace("\\","/")).name
     if not safe or safe in {".",".."}: raise HTTPException(400,"FILENAME_INVALID")
+    suffix_mimes={
+        ".pdf":"application/pdf",
+        ".txt":"text/plain",
+        ".csv":"text/csv",
+        ".md":"text/markdown",
+        ".markdown":"text/markdown",
+        ".json":"application/json",
+        ".docx":"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
+    mime_type=file.content_type if file.content_type in allowed else suffix_mimes.get(Path(safe).suffix.lower(), file.content_type)
+    if mime_type not in allowed: raise HTTPException(415,"MIME_TYPE_NOT_ALLOWED")
     key=f"{p.tenant_id}/{thread_id}/{digest}-{safe}"
     root=Path(settings.artifact_storage_path).resolve()
     target=(root/key).resolve()
@@ -946,7 +989,7 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
             thread_id=thread_id,
             uploaded_by=p.user_id,
             filename=safe,
-            mime_type=file.content_type,
+            mime_type=mime_type,
             data=data,
             sha256=digest,
             storage_key=key,

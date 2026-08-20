@@ -19,6 +19,9 @@ dependencies = [
   "cryptography>=43,<46",
   "python-multipart>=0.0.12,<1",
   "pypdf>=5.0,<7",
+  "reportlab>=4.0,<6",
+  "python-pptx>=1.0,<2",
+  "openpyxl>=3.1,<4",
   "email-validator>=2.2,<3",
   "defusedxml>=0.7.1,<1"
 ]

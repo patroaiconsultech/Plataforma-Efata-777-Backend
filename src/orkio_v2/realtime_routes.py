@@ -49,6 +49,12 @@ router = APIRouter(prefix="/api/v2", tags=["realtime"])
 realtime_logger = logging.getLogger("uvicorn.error")
 
 
+def _effective_direct_agent(requested_target: str, principal: Principal) -> str:
+    if {"admin", "orkio_admin"}.intersection(principal.roles):
+        return requested_target
+    return "orkio"
+
+
 class RealtimeCallCreate(BaseModel):
     sdp: str = Field(min_length=16, max_length=131072)
     target_mode: Literal["direct", "team"] = "direct"
@@ -233,13 +239,14 @@ async def realtime_call(
         if payload.target_mode == "direct":
             if not (payload.agent or "").strip():
                 raise HTTPException(422, detail={"code": "REALTIME_TARGET_REQUIRED"})
-            decision = resolve_direct_target_decision(str(payload.agent), settings)
+            effective_agent = _effective_direct_agent(str(payload.agent), p)
+            decision = resolve_direct_target_decision(effective_agent, settings)
             turn = build_direct_turn(
                 execution=decision.execution,
                 thread_id=thread_id,
                 tenant_id=p.tenant_id,
                 user_id=p.user_id,
-                requested_target=str(payload.agent),
+                requested_target=effective_agent,
                 channel=RuntimeChannel.REALTIME,
             )
             intent_metadata: dict[str, object] = {

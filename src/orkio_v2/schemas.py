@@ -5,6 +5,9 @@ from typing import Literal
 class ThreadCreate(BaseModel):
     title: str = Field("Nova conversa", max_length=240)
 
+class ThreadTitleUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
+
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=100000)
     agent: str = Field("Josué", max_length=160)

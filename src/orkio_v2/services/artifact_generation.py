@@ -19,6 +19,11 @@ from ..models import Artifact
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TXT_MIME = "text/plain"
+PDF_MIME = "application/pdf"
+PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+MARKDOWN_MIME = "text/markdown"
+JSON_MIME = "application/json"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 artifact_runtime_logger = logging.getLogger("uvicorn.error")
 
@@ -28,6 +33,11 @@ _ARTIFACT_INTENT_RE = re.compile(
 )
 _DOCX_RE = re.compile(r"(?:\.docx?\b|\bdocx?\b|\bword\b)", re.I)
 _TXT_RE = re.compile(r"(?:\.txt\b|\btxt\b|\btexto simples\b|\bplain text\b)", re.I)
+_PDF_RE = re.compile(r"(?:\.pdf\b|\bpdf\b)", re.I)
+_PPTX_RE = re.compile(r"(?:\.pptx?\b|\bpptx?\b|\bpowerpoint\b|\bapresenta(?:ção|cao)\b)", re.I)
+_MARKDOWN_RE = re.compile(r"(?:\.md\b|\bmarkdown\b)", re.I)
+_JSON_RE = re.compile(r"(?:\.json\b|\bjson\b)", re.I)
+_XLSX_RE = re.compile(r"(?:\.xlsx?\b|\bxlsx?\b|\bexcel\b|\bplanilha\b)", re.I)
 
 
 class ArtifactGenerationError(RuntimeError):
@@ -76,6 +86,16 @@ def detect_artifact_intent(message: str) -> ArtifactIntent | None:
         return None
     if _DOCX_RE.search(text):
         return ArtifactIntent("docx", ".docx", DOCX_MIME)
+    if _PDF_RE.search(text):
+        return ArtifactIntent("pdf", ".pdf", PDF_MIME)
+    if _PPTX_RE.search(text):
+        return ArtifactIntent("pptx", ".pptx", PPTX_MIME)
+    if _MARKDOWN_RE.search(text):
+        return ArtifactIntent("markdown", ".md", MARKDOWN_MIME)
+    if _JSON_RE.search(text):
+        return ArtifactIntent("json", ".json", JSON_MIME)
+    if _XLSX_RE.search(text):
+        return ArtifactIntent("xlsx", ".xlsx", XLSX_MIME)
     if _TXT_RE.search(text):
         return ArtifactIntent("txt", ".txt", TXT_MIME)
     return None
@@ -105,8 +125,8 @@ def _safe_filename(name: str, extension: str) -> str:
 
 
 def default_filename(intent: ArtifactIntent, *, agent_name: str) -> str:
-    label = re.sub(r"[^A-Za-z0-9_-]+", "-", (agent_name or "orkio").strip()).strip("-").lower()
-    return _safe_filename(f"orkio-{label or 'artifact'}", intent.extension)
+    label = re.sub(r"[^A-Za-z0-9_-]+", "-", (agent_name or "patroai").strip()).strip("-").lower()
+    return _safe_filename(f"patroai-{label or 'artifact'}", intent.extension)
 
 
 def _docx_bytes(text: str) -> bytes:
@@ -160,6 +180,157 @@ def _docx_bytes(text: str) -> bytes:
     return out.getvalue()
 
 
+def _strip_markdown_fence(content: str) -> str:
+    lines = (content or "").strip().splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def _json_bytes(content: str) -> bytes:
+    source = _strip_markdown_fence(content)
+    try:
+        parsed = json.loads(source)
+    except json.JSONDecodeError as exc:
+        raise ArtifactValidationFailed("ARTIFACT_JSON_INVALID") from exc
+    return json.dumps(parsed, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+def _pdf_bytes(text: str) -> bytes:
+    try:
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.pdfgen.canvas import Canvas
+    except ImportError as exc:
+        raise ArtifactFormatUnsupported("ARTIFACT_PDF_RENDERER_UNAVAILABLE") from exc
+
+    output = io.BytesIO()
+    canvas = Canvas(output, pagesize=A4)
+    width, height = A4
+    left = 20 * mm
+    top = height - 20 * mm
+    bottom = 20 * mm
+    leading = 14
+    y = top
+    for line in (text or "").replace("\r\n", "\n").split("\n"):
+        if y < bottom:
+            canvas.showPage()
+            y = top
+        canvas.drawString(left, y, line[:1800])
+        y -= leading
+    canvas.save()
+    return output.getvalue()
+
+
+def _pptx_bytes(text: str) -> bytes:
+    try:
+        from pptx import Presentation
+        from pptx.util import Inches
+    except ImportError as exc:
+        raise ArtifactFormatUnsupported("ARTIFACT_PPTX_RENDERER_UNAVAILABLE") from exc
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    box = slide.shapes.add_textbox(Inches(0.6), Inches(0.5), Inches(12.1), Inches(6.2))
+    frame = box.text_frame
+    frame.word_wrap = True
+    frame.text = (text or "").strip()
+    output = io.BytesIO()
+    presentation.save(output)
+    return output.getvalue()
+
+
+def _xlsx_bytes(text: str) -> bytes:
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:
+        raise ArtifactFormatUnsupported("ARTIFACT_XLSX_RENDERER_UNAVAILABLE") from exc
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "PatroAI"
+    lines = (text or "").replace("\r\n", "\n").split("\n")
+    rows: list[list[str]] = []
+    for line in lines:
+        clean = line.strip()
+        if not clean:
+            continue
+        if "|" in clean:
+            cells = [cell.strip() for cell in clean.strip("|").split("|")]
+            if cells and all(set(cell.replace("-", "").strip()) == set() for cell in cells):
+                continue
+            rows.append(cells)
+        elif "\t" in clean:
+            rows.append([cell.strip() for cell in clean.split("\t")])
+        else:
+            rows.append([clean])
+    if not rows:
+        raise ArtifactValidationFailed("ARTIFACT_EMPTY_CONTENT")
+    for row in rows:
+        sheet.append(row)
+    for column in sheet.columns:
+        width = min(max(len(str(cell.value or "")) for cell in column) + 2, 60)
+        sheet.column_dimensions[column[0].column_letter].width = width
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def _extract_xlsx_text(data: bytes) -> str:
+    try:
+        from openpyxl import load_workbook
+        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        values: list[str] = []
+        for sheet in workbook.worksheets:
+            for row in sheet.iter_rows(values_only=True):
+                cells = [str(value) for value in row if value is not None and str(value).strip()]
+                if cells:
+                    values.append(" | ".join(cells))
+        workbook.close()
+    except Exception as exc:
+        raise ArtifactValidationFailed("ARTIFACT_XLSX_VALIDATION_FAILED") from exc
+    text = "\n".join(values).strip()
+    if not text:
+        raise ArtifactValidationFailed("ARTIFACT_XLSX_SEMANTIC_EMPTY")
+    return text
+
+
+def _extract_pdf_text(data: bytes) -> str:
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data), strict=True)
+        return "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    except Exception as exc:
+        raise ArtifactValidationFailed("ARTIFACT_PDF_VALIDATION_FAILED") from exc
+
+
+def _extract_pptx_text(data: bytes) -> str:
+    try:
+        from pptx import Presentation
+        presentation = Presentation(io.BytesIO(data))
+        values: list[str] = []
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False):
+                    values.append(shape.text or "")
+        text = "\n".join(values).strip()
+    except Exception as exc:
+        raise ArtifactValidationFailed("ARTIFACT_PPTX_VALIDATION_FAILED") from exc
+    if not text:
+        raise ArtifactValidationFailed("ARTIFACT_PPTX_SEMANTIC_EMPTY")
+    return text
+
+
+def _extract_json_text(data: bytes) -> str:
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ArtifactValidationFailed("ARTIFACT_JSON_VALIDATION_FAILED") from exc
+    return json.dumps(parsed, ensure_ascii=False, indent=2)
+
+
 def _extract_docx_text(data: bytes) -> str:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
@@ -199,20 +370,42 @@ def render_and_validate(
     if intent.requested_format == "docx":
         data = _docx_bytes(normalized)
         semantic_text = _extract_docx_text(data)
-        renderer = "orkio_docx_minimal_v1"
+        renderer = "patroai_docx_minimal_v1"
+    elif intent.requested_format == "pdf":
+        data = _pdf_bytes(normalized)
+        semantic_text = _extract_pdf_text(data)
+        renderer = "patroai_pdf_reportlab_v1"
+    elif intent.requested_format == "pptx":
+        data = _pptx_bytes(normalized)
+        semantic_text = _extract_pptx_text(data)
+        renderer = "patroai_pptx_python_v1"
+    elif intent.requested_format == "markdown":
+        data = normalized.encode("utf-8")
+        semantic_text = data.decode("utf-8").strip()
+        renderer = "patroai_markdown_v1"
+    elif intent.requested_format == "json":
+        data = _json_bytes(normalized)
+        semantic_text = _extract_json_text(data)
+        renderer = "patroai_json_v1"
+    elif intent.requested_format == "xlsx":
+        data = _xlsx_bytes(normalized)
+        semantic_text = _extract_xlsx_text(data)
+        renderer = "patroai_xlsx_openpyxl_v1"
     elif intent.requested_format == "txt":
         data = normalized.encode("utf-8")
         semantic_text = data.decode("utf-8").strip()
         if not semantic_text:
             raise ArtifactValidationFailed("ARTIFACT_TXT_SEMANTIC_EMPTY")
-        renderer = "orkio_text_v1"
+        renderer = "patroai_text_v1"
     else:
         raise ArtifactFormatUnsupported("ARTIFACT_FORMAT_UNSUPPORTED")
 
-    # semantic guard: the validated output must retain meaningful source content
-    probe = re.sub(r"\s+", " ", normalized).strip()[:80]
-    if probe and probe not in re.sub(r"\s+", " ", semantic_text):
-        raise ArtifactValidationFailed("ARTIFACT_SEMANTIC_MISMATCH")
+    # Structured JSON is validated by parse/re-serialization; textual formats retain
+    # the historical semantic probe to ensure the renderer did not drop source text.
+    if intent.requested_format != "json":
+        probe = re.sub(r"\s+", " ", normalized).strip()[:80]
+        if probe and probe not in re.sub(r"\s+", " ", semantic_text):
+            raise ArtifactValidationFailed("ARTIFACT_SEMANTIC_MISMATCH")
 
     return ValidatedArtifactBytes(
         filename=filename,
@@ -271,7 +464,15 @@ def persist_validated_artifact(
             raise ArtifactValidationFailed("ARTIFACT_FINAL_BYTES_HASH_MISMATCH")
         if validated.mime_type == DOCX_MIME:
             _extract_docx_text(final_bytes)
-        elif validated.mime_type == TXT_MIME:
+        elif validated.mime_type == PDF_MIME:
+            _extract_pdf_text(final_bytes)
+        elif validated.mime_type == PPTX_MIME:
+            _extract_pptx_text(final_bytes)
+        elif validated.mime_type == JSON_MIME:
+            _extract_json_text(final_bytes)
+        elif validated.mime_type == XLSX_MIME:
+            _extract_xlsx_text(final_bytes)
+        elif validated.mime_type in {TXT_MIME, MARKDOWN_MIME}:
             if not final_bytes.decode("utf-8").strip():
                 raise ArtifactValidationFailed("ARTIFACT_FINAL_TEXT_EMPTY")
         tmp.replace(target)

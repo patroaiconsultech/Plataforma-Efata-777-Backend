@@ -97,10 +97,13 @@ class DocumentContextBundle:
 _TEXT_MIME_TYPES = {
     "text/plain",
     "text/csv",
+    "text/markdown",
     "application/json",
 }
 _PDF_MIME = "application/pdf"
 _DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 document_context_logger = logging.getLogger("uvicorn.error")
 
@@ -215,6 +218,44 @@ def _extract_docx(
     return "\n".join(paragraphs)
 
 
+def _extract_pptx(raw: bytes) -> str:
+    try:
+        from pptx import Presentation
+    except ImportError as exc:
+        raise DocumentExtractionUnsupported("DOCUMENT_PPTX_READER_UNAVAILABLE") from exc
+    try:
+        presentation = Presentation(io.BytesIO(raw))
+        values: list[str] = []
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if getattr(shape, "has_text_frame", False):
+                    text = (shape.text or "").strip()
+                    if text:
+                        values.append(text)
+        return "\n".join(values)
+    except Exception as exc:
+        raise DocumentExtractionFailed("DOCUMENT_PPTX_EXTRACTION_FAILED") from exc
+
+
+def _extract_xlsx(raw: bytes) -> str:
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise DocumentExtractionUnsupported("DOCUMENT_XLSX_READER_UNAVAILABLE") from exc
+    try:
+        workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+        values: list[str] = []
+        for sheet in workbook.worksheets:
+            for row in sheet.iter_rows(values_only=True):
+                cells = [str(value) for value in row if value is not None and str(value).strip()]
+                if cells:
+                    values.append(" | ".join(cells))
+        workbook.close()
+        return "\n".join(values)
+    except Exception as exc:
+        raise DocumentExtractionFailed("DOCUMENT_XLSX_EXTRACTION_FAILED") from exc
+
+
 def _extract_pdf(raw: bytes, *, max_pages: int) -> str:
     try:
         from pypdf import PdfReader
@@ -247,6 +288,10 @@ def _extract_document_text_unbounded(
         text = _extract_text_plain(raw, mime_type=mime_type)
     elif mime_type == _DOCX_MIME:
         text = _extract_docx(raw, ingestion_policy=policy)
+    elif mime_type == _PPTX_MIME:
+        text = _extract_pptx(raw)
+    elif mime_type == _XLSX_MIME:
+        text = _extract_xlsx(raw)
     elif mime_type == _PDF_MIME:
         text = _extract_pdf(raw, max_pages=max_pdf_pages)
     else:
