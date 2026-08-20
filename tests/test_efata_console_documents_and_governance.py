@@ -67,6 +67,19 @@ def test_artifact_renderers_reopen_and_validate(phrase, filename, mime_type):
     assert result.semantic_text
 
 
+def test_xlsx_renderer_accepts_markdown_table_separator():
+    intent = detect_artifact_intent("gere uma planilha Excel")
+    assert intent is not None
+    result = render_and_validate(
+        intent=intent,
+        content="| Indicador | Status |\n|---|:---:|\n| Projetos | Validado |",
+        filename="indicadores.xlsx",
+    )
+    assert result.mime_type == XLSX_MIME
+    assert "Indicador" in result.semantic_text
+    assert "Validado" in result.semantic_text
+
+
 def test_document_context_reads_markdown_json_pptx_and_pdf():
     assert extract_document_text(
         filename="briefing.md",

@@ -242,6 +242,17 @@ def _pptx_bytes(text: str) -> bytes:
     return output.getvalue()
 
 
+def _xlsx_separator_row(line: str) -> bool:
+    clean = (line or "").strip()
+    if "|" not in clean:
+        return False
+    cells = [cell.strip() for cell in clean.strip("|").split("|")]
+    return bool(cells) and all(
+        set(cell.replace("-", "").replace(":", "").strip()) == set()
+        for cell in cells
+    )
+
+
 def _xlsx_bytes(text: str) -> bytes:
     try:
         from openpyxl import Workbook
@@ -259,7 +270,7 @@ def _xlsx_bytes(text: str) -> bytes:
             continue
         if "|" in clean:
             cells = [cell.strip() for cell in clean.strip("|").split("|")]
-            if cells and all(set(cell.replace("-", "").strip()) == set() for cell in cells):
+            if _xlsx_separator_row(clean):
                 continue
             rows.append(cells)
         elif "\t" in clean:
@@ -403,7 +414,22 @@ def render_and_validate(
     # Structured JSON is validated by parse/re-serialization; textual formats retain
     # the historical semantic probe to ensure the renderer did not drop source text.
     if intent.requested_format != "json":
-        probe = re.sub(r"\s+", " ", normalized).strip()[:80]
+        probe_source = normalized
+        if intent.requested_format == "xlsx":
+            semantic_rows: list[str] = []
+            for line in normalized.splitlines():
+                clean = line.strip()
+                if not clean or _xlsx_separator_row(clean):
+                    continue
+                if "|" in clean:
+                    cells = [cell.strip() for cell in clean.strip("|").split("|")]
+                elif "\t" in clean:
+                    cells = [cell.strip() for cell in clean.split("\t")]
+                else:
+                    cells = [clean]
+                semantic_rows.append(" | ".join(cells))
+            probe_source = "\n".join(semantic_rows)
+        probe = re.sub(r"\s+", " ", probe_source).strip()[:80]
         if probe and probe not in re.sub(r"\s+", " ", semantic_text):
             raise ArtifactValidationFailed("ARTIFACT_SEMANTIC_MISMATCH")
 
