@@ -16,6 +16,7 @@ class AuditEventType:
     PERSISTENCE_SUCCEEDED = "persistence_succeeded"
     EXECUTION_COMPLETED = "execution_completed"
     EXECUTION_FAILED = "execution_failed"
+    INTERNAL_CONSULTATION = "internal_consultation"
 
 
 _SENSITIVE_KEY = re.compile(
@@ -136,6 +137,12 @@ class ExecutionObserver:
         self._emit(
             AuditEventType.EXECUTION_COMPLETED,
             {"provider": provider, "model": model, "latency_ms": latency_ms},
+        )
+
+    def consulted(self, *, count: int, domains: list[str]) -> None:
+        self._emit(
+            AuditEventType.INTERNAL_CONSULTATION,
+            {"count": count, "domains": domains[:8]},
         )
 
     def fail(self, error_code: str) -> None:

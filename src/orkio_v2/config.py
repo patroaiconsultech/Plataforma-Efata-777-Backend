@@ -6,8 +6,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
-    environment: Literal["development","test","staging","production"] = Field("development", alias="PLATFORM_ENVIRONMENT")
-    release_sha: str = Field("local", alias="PLATFORM_RELEASE_SHA")
+    environment: Literal["development","test","staging","production"] = Field(
+        "development",
+        validation_alias=AliasChoices("PLATFORM_ENVIRONMENT", "RAILWAY_ENVIRONMENT_NAME"),
+    )
+    release_sha: str = Field(
+        "local",
+        validation_alias=AliasChoices("PLATFORM_RELEASE_SHA", "RAILWAY_GIT_COMMIT_SHA"),
+    )
     database_url: str = Field("sqlite+pysqlite:///./orkio_v2.db", alias="DATABASE_URL")
     allowed_origins: str = Field("http://localhost:5173", alias="PLATFORM_ALLOWED_ORIGINS")
 
@@ -36,6 +42,12 @@ class Settings(BaseSettings):
         False, alias="PLATFORM_LLM_PROVIDER_FAILOVER_ENABLED"
     )
     llm_auto_route_enabled: bool = Field(False, alias="PLATFORM_LLM_AUTO_ROUTE_ENABLED")
+    internal_agent_consultation_enabled: bool = Field(
+        False, alias="PLATFORM_INTERNAL_AGENT_CONSULTATION_ENABLED"
+    )
+    internal_agent_consultation_max: int = Field(
+        2, alias="PLATFORM_INTERNAL_AGENT_CONSULTATION_MAX"
+    )
 
     openai_api_key: str | None = Field(None, alias="OPENAI_API_KEY")
     openai_model: str = Field("gpt-5", alias="OPENAI_DEFAULT_MODEL")

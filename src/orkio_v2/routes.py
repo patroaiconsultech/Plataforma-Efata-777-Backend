@@ -66,11 +66,17 @@ from .services.capability_plane import (
     runtime_capability_messages,
 )
 from .services.capability_policy import CapabilityPolicy, CapabilityPolicyError
+from .services.internal_consultation import (
+    InternalConsultationError,
+    build_internal_consultation_context,
+    internal_contribution_messages,
+)
 from .services.python_tool import PythonToolError, execute_python
 from .services.external_read_tool import ExternalReadError, read_external_url
 
 router=APIRouter(prefix="/api/v2")
 artifact_gate_logger=logging.getLogger("orkio.artifact_gate")
+internal_consultation_logger=logging.getLogger("orkio.internal_consultation")
 
 
 @router.post("/access/validate")
@@ -706,6 +712,8 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
         channel=RuntimeChannel.CHAT_SSE,
     )
 
+    internal_contributions = ()
+    internal_consultation_plans = ()
     configured=True
     try:
         llm.ensure_configured(settings)
@@ -765,7 +773,26 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
             message=payload.content,
             roles=p.roles,
         )
-        runtime_system_messages = list(github_messages) + list(capability_messages)
+        if hyper_surface and settings.internal_agent_consultation_enabled:
+            try:
+                internal_contributions, internal_consultation_plans = (
+                    await build_internal_consultation_context(
+                        settings,
+                        turn=turn,
+                        message=payload.content,
+                    )
+                )
+            except InternalConsultationError:
+                internal_consultation_logger.warning(
+                    "INTERNAL_CONSULTATION_FAILED execution_id=%s thread_id=%s",
+                    turn.execution_id,
+                    thread_id,
+                )
+        runtime_system_messages = (
+            list(github_messages)
+            + internal_contribution_messages(internal_contributions)
+            + list(capability_messages)
+        )
         if hyper_surface:
             runtime_system_messages.insert(
                 0,
@@ -804,6 +831,11 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
     )
     observer=ExecutionObserver.from_turn(turn,execution_engine=execution.execution_engine.value)
     observer.start()
+    if internal_contributions:
+        observer.consulted(
+            count=len(internal_contributions),
+            domains=[contribution.purpose for contribution in internal_contributions],
+        )
 
     async def events():
         emitted:list[RuntimeEvent]=[]
@@ -834,6 +866,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
             agent_id=turn.turn_owner_agent_id,
             ownership_locked=turn.ownership_locked,
             chat_availability=availability.chat.status.value,
+            internal_consultation=bool(internal_contributions),
         ))
         parts:list[str]=[]
         try:

@@ -10,6 +10,10 @@ from . import llm
 from .direct_runtime import build_turn as build_direct_turn, persist_agent_response
 from .execution_router import resolve_direct_target_decision
 from .hyper_cocreator import hyper_cocreator_system_message, profile_for
+from .internal_consultation import (
+    build_internal_consultation_context,
+    internal_contribution_messages,
+)
 from .team_runtime import (
     build_team_plan,
     build_team_turn,
@@ -102,6 +106,18 @@ async def execute_realtime_direct(
             tenant_id=tenant_id,
             settings=settings,
         )
+        if settings.internal_agent_consultation_enabled and turn.turn_owner_agent_id == "orkio":
+            try:
+                contributions, _ = await build_internal_consultation_context(
+                    settings,
+                    turn=turn,
+                    message=transcript,
+                )
+                history = internal_contribution_messages(contributions) + history
+            except Exception:
+                # Internal consultation is an optional enhancement. The public
+                # Realtime response must remain available if a specialist fails.
+                pass
         if turn.turn_owner_agent_id == "orkio":
             profile = profile_for(
                 db,
