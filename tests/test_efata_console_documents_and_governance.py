@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import headers
+from conftest import Testing, headers
 from orkio_v2.services.artifact_generation import (
     DOCX_MIME,
     JSON_MIME,
@@ -18,6 +18,12 @@ from orkio_v2.services.artifact_generation import (
     _pptx_bytes,
     _xlsx_bytes,
 )
+from orkio_v2.auth import Principal
+from orkio_v2.config import get_settings
+from orkio_v2.models import Membership
+from orkio_v2.services import llm
+from orkio_v2.routes import _effective_agent_target
+from orkio_v2.realtime_routes import _effective_direct_agent
 from orkio_v2.services.document_context import extract_document_text
 
 
@@ -117,6 +123,43 @@ def test_owner_can_rename_thread_and_read_updated_title(client):
     assert renamed.json()["title"] == "Plano de impacto Efata"
     listed = client.get("/api/v2/threads", headers=headers()).json()["items"]
     assert next(item for item in listed if item["id"] == thread["id"])["title"] == "Plano de impacto Efata"
+
+
+def test_common_agent_guards_preserve_technical_namespace():
+    principal = Principal(user_id="user-1", tenant_id="tenant-1", roles=("member",))
+    assert _effective_agent_target("id:admin-agent", principal) == "id:orkio"
+    assert _effective_direct_agent("id:admin-agent", principal) == "id:orkio"
+
+
+def test_common_member_stream_resolves_co_creator(client, monkeypatch):
+    with Testing() as db:
+        db.add(Membership(tenant_id="tenant-1", user_id="user-2", role="member"))
+        db.commit()
+
+    try:
+        monkeypatch.setattr(get_settings(), "openai_api_key", "test-key-not-real", raising=False)
+
+        async def fake_stream(settings, agent, history):
+            assert agent == "orkio"
+            yield "Resposta do Co-Criador."
+
+        monkeypatch.setattr(llm, "stream", fake_stream)
+        thread = client.post("/api/v2/threads", json={}, headers=headers(user="user-2", roles="member")).json()
+        response = client.post(
+            f"/api/v2/threads/{thread['id']}/stream",
+            json={"content": "Teste de chat comum", "agent": "id:orkio"},
+            headers=headers(user="user-2", roles="member"),
+        )
+        assert response.status_code == 200
+        assert '"agent_id": "orkio"' in response.text
+        assert 'event: done' in response.text
+    finally:
+        with Testing() as db:
+            db.query(Membership).filter(
+                Membership.tenant_id == "tenant-1",
+                Membership.user_id == "user-2",
+            ).delete()
+            db.commit()
 
 
 def test_governance_guards_are_present_for_common_agent_and_thread_rename():

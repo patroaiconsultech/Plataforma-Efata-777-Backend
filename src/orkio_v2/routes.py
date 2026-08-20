@@ -269,7 +269,9 @@ def _resolve_target_or_404(requested_target: str, settings: Settings):
 def _effective_agent_target(requested_target: str, p: Principal) -> str:
     if {"admin", "orkio_admin"}.intersection(p.roles):
         return requested_target
-    return "orkio"
+    # O resolver mantém IDs técnicos no namespace explícito `id:<slug>`.
+    # Retornar o slug cru aqui fazia o Co-Criador cair em TARGET_NOT_FOUND.
+    return "id:orkio"
 
 INVITE_ALLOWED_ROLES={ThreadRole.owner.value, ThreadRole.moderator.value}
 

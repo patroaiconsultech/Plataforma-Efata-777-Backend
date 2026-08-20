@@ -52,7 +52,8 @@ realtime_logger = logging.getLogger("uvicorn.error")
 def _effective_direct_agent(requested_target: str, principal: Principal) -> str:
     if {"admin", "orkio_admin"}.intersection(principal.roles):
         return requested_target
-    return "orkio"
+    # O resolver usa o namespace técnico explícito para IDs de agentes.
+    return "id:orkio"
 
 
 class RealtimeCallCreate(BaseModel):
