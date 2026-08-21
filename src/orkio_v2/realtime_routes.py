@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .auth import Principal
@@ -30,6 +34,7 @@ from .services.realtime_execution import (
     RealtimeExecutionError,
     execute_realtime_direct,
     execute_realtime_team,
+    stream_realtime_direct,
 )
 from .services.realtime_session import (
     RealtimeSessionError,
@@ -43,6 +48,7 @@ from .services.team_runtime import (
     build_team_turn,
 )
 from .services.voice_binding import VoiceBindingError, resolve_voice_profile
+from .services.text_to_speech import TextToSpeechError, synthesize_speech
 
 
 router = APIRouter(prefix="/api/v2", tags=["realtime"])
@@ -71,6 +77,7 @@ class RealtimeFinalTranscript(BaseModel):
     provider_item_id: str = Field(min_length=1, max_length=256)
     transcript_final_id: str = Field(min_length=1, max_length=256)
     transcript: str = Field(min_length=1, max_length=100000)
+    locale: Literal["pt-BR", "en-US", "es-419"] = "pt-BR"
 
 
 def _thread_access(db: Session, *, thread_id: str, principal: Principal) -> ThreadParticipant:
@@ -487,6 +494,261 @@ def _session_intent(
     if not bool(data.get("ownership_locked")):
         raise HTTPException(409, detail={"code": "REALTIME_OWNER_MISMATCH"})
     return data
+
+
+_REALTIME_STREAM_MAX_SEGMENTS = 16
+
+
+def _sse_payload(payload: dict[str, object]) -> str:
+    event_type = str(payload.get("type") or "message")
+    return (
+        f"event: {event_type}\n"
+        f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+    )
+
+
+def _enforce_realtime_segment_limits(
+    db: Session,
+    *,
+    settings: Settings,
+    principal: Principal,
+    thread_id: str,
+    turn_id: str,
+    segment_id: str,
+) -> None:
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=1)
+    statement = select(func.count(AuditEvent.id)).where(
+        AuditEvent.tenant_id == principal.tenant_id,
+        AuditEvent.action == "realtime_tts_segment",
+        AuditEvent.created_at >= cutoff,
+    )
+    tenant_count = int(db.scalar(statement) or 0)
+    if tenant_count >= settings.tts_tenant_rate_limit_per_minute:
+        raise TextToSpeechError("TTS_RATE_LIMITED")
+    user_count = int(
+        db.scalar(statement.where(AuditEvent.actor_id == principal.user_id)) or 0
+    )
+    if user_count >= settings.tts_user_rate_limit_per_minute:
+        raise TextToSpeechError("TTS_RATE_LIMITED")
+    db.add(
+        AuditEvent(
+            tenant_id=principal.tenant_id,
+            actor_id=principal.user_id,
+            action="realtime_tts_segment",
+            resource_type="realtime_turn",
+            resource_id=turn_id,
+            outcome="started",
+            metadata_json={"thread_id": thread_id, "segment_id": segment_id},
+        )
+    )
+    db.commit()
+
+
+@router.post("/threads/{thread_id}/realtime/turns/stream")
+async def realtime_stream_turn(
+    thread_id: str,
+    payload: RealtimeFinalTranscript,
+    p: Principal = Depends(require_provisioned_principal),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    """Stream the governed direct Co-Creator answer as text plus speech segments.
+
+    The existing provider Realtime call remains input/VAD/transcription-only.
+    This endpoint owns the canonical LLM stream and uses the configured TTS
+    adapter once per safe sentence as an incremental compatibility path.
+    """
+    _thread_access(db, thread_id=thread_id, principal=p)
+    if not settings.realtime_bridge_enabled:
+        raise HTTPException(503, detail={"code": "REALTIME_ORCHESTRATION_BRIDGE_REQUIRED"})
+    if not settings.tts_enabled:
+        raise HTTPException(503, detail={"code": "TTS_DISABLED"})
+
+    intent = _session_intent(
+        db,
+        principal=p,
+        thread_id=thread_id,
+        session_id=payload.session_id,
+    )
+    if str(intent.get("target_mode") or "direct") != "direct":
+        raise HTTPException(409, detail={"code": "REALTIME_STREAM_TEAM_NOT_SUPPORTED"})
+    agent_id = str(intent.get("agent_id") or "").strip()
+    if not agent_id:
+        raise HTTPException(409, detail={"code": "REALTIME_OWNER_MISMATCH"})
+
+    try:
+        profile = resolve_voice_profile(
+            agent_id,
+            payload.locale,
+            settings,
+            delivery_mode="REALTIME_STREAM",
+        )
+    except VoiceBindingError as exc:
+        _raise_voice_error(exc)
+
+    try:
+        turn_key = realtime_turn_key(
+            tenant_id=p.tenant_id,
+            thread_id=thread_id,
+            session_id=payload.session_id,
+            provider_item_id=payload.provider_item_id,
+            transcript_final_id=payload.transcript_final_id,
+        )
+    except RealtimeBridgeError as exc:
+        raise HTTPException(422, detail={"code": exc.code}) from exc
+
+    existing = load_receipt(db, tenant_id=p.tenant_id, turn_key=turn_key)
+    if existing is not None:
+        if existing.state == "completed":
+            raise HTTPException(409, detail={"code": "REALTIME_TURN_ALREADY_COMPLETED"})
+        if existing.state == "processing":
+            raise HTTPException(409, detail={"code": "REALTIME_TURN_IN_PROGRESS"})
+        raise HTTPException(409, detail={"code": "REALTIME_PREVIOUS_ATTEMPT_FAILED"})
+
+    reserve_receipt(
+        db,
+        tenant_id=p.tenant_id,
+        actor_id=p.user_id,
+        thread_id=thread_id,
+        turn_key=turn_key,
+        session_id=payload.session_id,
+    )
+
+    async def events():
+        emitted_done = False
+        segments_count = 0
+        try:
+            async for item in stream_realtime_direct(
+                db,
+                settings=settings,
+                tenant_id=p.tenant_id,
+                user_id=p.user_id,
+                thread_id=thread_id,
+                agent_id=agent_id,
+                transcript=payload.transcript,
+            ):
+                item_type = str(item.get("type") or "")
+                if item_type == "segment_ready":
+                    segments_count += 1
+                    if segments_count > _REALTIME_STREAM_MAX_SEGMENTS:
+                        raise RealtimeExecutionError(
+                            "REALTIME_TTS_SEGMENT_LIMIT",
+                            stage="tts_segment_limit",
+                        )
+                    segment_id = str(item.get("segment_id") or f"seg-{segments_count}")
+                    text_value = str(item.get("text") or "").strip()
+                    if not text_value:
+                        continue
+                    yield _sse_payload({
+                        "type": "segment_started",
+                        "turn_id": item.get("turn_id"),
+                        "segment_id": segment_id,
+                        "segment_number": segments_count,
+                        "text": text_value,
+                    })
+                    _enforce_realtime_segment_limits(
+                        db,
+                        settings=settings,
+                        principal=p,
+                        thread_id=thread_id,
+                        turn_id=str(item.get("turn_id") or payload.session_id),
+                        segment_id=segment_id,
+                    )
+                    try:
+                        audio = await synthesize_speech(
+                            settings,
+                            profile,
+                            text_value,
+                            request_id=f"{item.get('turn_id', payload.session_id)}:{segment_id}",
+                        )
+                    except TextToSpeechError:
+                        raise
+                    yield _sse_payload({
+                        "type": "audio_segment",
+                        "turn_id": item.get("turn_id"),
+                        "segment_id": segment_id,
+                        "segment_number": segments_count,
+                        "codec": "audio/mpeg",
+                        "data_base64": base64.b64encode(audio).decode("ascii"),
+                    })
+                    yield _sse_payload({
+                        "type": "segment_done",
+                        "turn_id": item.get("turn_id"),
+                        "segment_id": segment_id,
+                        "segment_number": segments_count,
+                    })
+                elif item_type == "text_delta":
+                    yield _sse_payload(item)
+                elif item_type == "turn_started":
+                    yield _sse_payload(item)
+                elif item_type == "done":
+                    receipt = complete_receipt(
+                        db,
+                        tenant_id=p.tenant_id,
+                        turn_key=turn_key,
+                        message_id=str(item["message_id"]),
+                        execution_id=str(item["execution_id"]),
+                        agent_id=str(item["agent_id"]),
+                    )
+                    done_payload = dict(item)
+                    done_payload["execution_id"] = receipt.execution_id
+                    done_payload["segments_count"] = segments_count
+                    emitted_done = True
+                    yield _sse_payload(done_payload)
+        except asyncio.CancelledError:
+            if not emitted_done:
+                fail_receipt(
+                    db,
+                    tenant_id=p.tenant_id,
+                    turn_key=turn_key,
+                    error_code="CLIENT_DISCONNECTED",
+                )
+            raise
+        except (RealtimeExecutionError, TextToSpeechError) as exc:
+            if not emitted_done:
+                code = getattr(exc, "code", "REALTIME_STREAM_FAILED")
+                fail_receipt(
+                    db,
+                    tenant_id=p.tenant_id,
+                    turn_key=turn_key,
+                    error_code=code,
+                )
+                yield _sse_payload({
+                    "type": "error",
+                    "code": code,
+                    "turn_id": payload.session_id,
+                })
+                yield _sse_payload({
+                    "type": "done",
+                    "status": "failed",
+                    "code": code,
+                    "turn_id": payload.session_id,
+                })
+        except Exception:
+            if not emitted_done:
+                fail_receipt(
+                    db,
+                    tenant_id=p.tenant_id,
+                    turn_key=turn_key,
+                    error_code="REALTIME_STREAM_FAILED",
+                )
+                yield _sse_payload({
+                    "type": "error",
+                    "code": "REALTIME_STREAM_FAILED",
+                    "turn_id": payload.session_id,
+                })
+                yield _sse_payload({
+                    "type": "done",
+                    "status": "failed",
+                    "code": "REALTIME_STREAM_FAILED",
+                    "turn_id": payload.session_id,
+                })
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/threads/{thread_id}/realtime/turns")

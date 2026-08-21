@@ -91,6 +91,18 @@ def realtime_capability(settings: Settings) -> dict[str, object]:
                 else "AGENT_VOICE_BINDING_NOT_VALIDATED"
             ),
         },
+        "voice_segment_streaming": {
+            "status": "CONFIGURED" if bridge_configured and tts_configured else "DISABLED",
+            "eligible": bool(bridge_configured and tts_configured),
+            "reason_code": (
+                "REALTIME_VOICE_SEGMENT_STREAMING_READY"
+                if bridge_configured and tts_configured
+                else "REALTIME_VOICE_SEGMENT_STREAMING_NOT_READY"
+            ),
+            "transport": "sse",
+            "audio_mode": "segment_mp3",
+            "provider_streaming": False,
+        },
         "interruption": {
             "status": "NOT_PROVEN",
             "eligible": False,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
@@ -7,7 +8,11 @@ from sqlalchemy.orm import Session
 from ..config import Settings
 from ..runtime.contracts import RuntimeChannel
 from . import llm
-from .direct_runtime import build_turn as build_direct_turn, persist_agent_response
+from .direct_runtime import (
+    build_turn as build_direct_turn,
+    envelope_payload,
+    persist_agent_response,
+)
 from .execution_router import resolve_direct_target_decision
 from .hyper_cocreator import hyper_cocreator_system_message, profile_for
 from .internal_consultation import (
@@ -22,6 +27,7 @@ from .team_runtime import (
     persist_user_message,
     team_history,
 )
+from .realtime_segmenter import SentenceSegmenter
 
 
 class RealtimeExecutionError(RuntimeError):
@@ -307,3 +313,146 @@ async def execute_realtime_team(
         content=row.content,
         target_mode="team",
     )
+
+
+async def stream_realtime_direct(
+    db: Session,
+    *,
+    settings: Settings,
+    tenant_id: str,
+    user_id: str,
+    thread_id: str,
+    agent_id: str,
+    transcript: str,
+) -> AsyncIterator[dict[str, object]]:
+    """Stream governed text and speech segments for the direct Co-Creator turn.
+
+    The provider Realtime session remains input/VAD/transcription-only. This
+    generator owns the canonical LLM response and emits speech segments before
+    the final assistant message is persisted.
+    """
+    try:
+        requested_target = agent_id if agent_id.startswith("id:") else f"id:{agent_id}"
+        decision = resolve_direct_target_decision(requested_target, settings)
+        turn = build_direct_turn(
+            execution=decision.execution,
+            thread_id=thread_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            requested_target=agent_id,
+            channel=RuntimeChannel.REALTIME,
+        )
+        persist_user_message(db, turn=turn, content=transcript)
+        history = team_history(
+            db,
+            thread_id=thread_id,
+            tenant_id=tenant_id,
+            settings=settings,
+        )
+        if settings.internal_agent_consultation_enabled and turn.turn_owner_agent_id == "orkio":
+            try:
+                contributions, _ = await build_internal_consultation_context(
+                    settings,
+                    turn=turn,
+                    message=transcript,
+                )
+                history = internal_contribution_messages(contributions) + history
+            except Exception:
+                # Specialist consultation is optional; the canonical response
+                # remains available when an internal contributor is unavailable.
+                pass
+        if turn.turn_owner_agent_id == "orkio":
+            profile = profile_for(db, tenant_id=tenant_id, user_id=user_id)
+            history.insert(
+                0,
+                hyper_cocreator_system_message(
+                    co_creator_name=profile.co_creator_name if profile else None,
+                    onboarding_goal=profile.onboarding_goal if profile else None,
+                ),
+            )
+    except RealtimeExecutionError:
+        raise
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="prepare_stream", exc=exc) from exc
+
+    segmenter = SentenceSegmenter()
+    answer_parts: list[str] = []
+    segment_number = 0
+    yield {
+        "type": "turn_started",
+        "turn_id": turn.execution_id,
+        "execution_id": turn.execution_id,
+        "agent_id": turn.turn_owner_agent_id,
+        "agent_name": turn.display_agent_name,
+    }
+
+    try:
+        async for delta in llm.stream(settings, turn.turn_owner_agent_id, history):
+            if not delta:
+                continue
+            answer_parts.append(delta)
+            yield {
+                "type": "text_delta",
+                "turn_id": turn.execution_id,
+                "text": delta,
+            }
+            for segment in segmenter.push(delta):
+                segment_number += 1
+                yield {
+                    "type": "segment_ready",
+                    "turn_id": turn.execution_id,
+                    "segment_id": f"seg-{segment_number}",
+                    "segment_number": segment_number,
+                    "text": segment,
+                }
+
+        for segment in segmenter.flush():
+            segment_number += 1
+            yield {
+                "type": "segment_ready",
+                "turn_id": turn.execution_id,
+                "segment_id": f"seg-{segment_number}",
+                "segment_number": segment_number,
+                "text": segment,
+            }
+    except llm.LLMNotConfigured as exc:
+        raise RealtimeExecutionError(
+            "LLM_NOT_CONFIGURED",
+            stage="llm_stream",
+            exception_type=type(exc).__name__,
+            request_id=turn.request_id,
+            execution_id=turn.execution_id,
+        ) from exc
+    except Exception as exc:
+        raise RealtimeExecutionError(
+            "LLM_UPSTREAM_ERROR",
+            stage="llm_stream",
+            exception_type=type(exc).__name__,
+            request_id=turn.request_id,
+            execution_id=turn.execution_id,
+        ) from exc
+
+    answer = "".join(answer_parts).strip()
+    if not answer:
+        raise RealtimeExecutionError(
+            "LLM_EMPTY_RESPONSE",
+            stage="llm_stream",
+            request_id=turn.request_id,
+            execution_id=turn.execution_id,
+        )
+
+    try:
+        row, envelope = persist_agent_response(db, turn=turn, content=answer)
+    except Exception as exc:
+        raise _unexpected_execution_error(stage="persist_agent", exc=exc, turn=turn) from exc
+
+    yield {
+        "type": "done",
+        "turn_id": turn.execution_id,
+        "message_id": row.id,
+        "agent_id": turn.turn_owner_agent_id,
+        "agent_name": turn.display_agent_name,
+        "content": row.content,
+        "response": envelope_payload(envelope),
+        "segments_count": segment_number,
+    }
