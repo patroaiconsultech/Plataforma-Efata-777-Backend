@@ -527,6 +527,31 @@ def persist_validated_artifact(
         )
         db.add(row)
         db.commit()
+    except BlobStorageError as exc:
+        db.rollback()
+        if artifact_created:
+            try:
+                storage.delete(key)
+            except BlobStorageError:
+                artifact_runtime_logger.warning(
+                    "ARTIFACT_CLEANUP_FAILED %s",
+                    json.dumps(
+                        {"event": "artifact_cleanup_failed", "artifact_id": artifact_id, "path_name": key},
+                        sort_keys=True,
+                    ),
+                )
+        if provenance_created:
+            try:
+                storage.delete(provenance_key)
+            except BlobStorageError:
+                artifact_runtime_logger.warning(
+                    "ARTIFACT_CLEANUP_FAILED %s",
+                    json.dumps(
+                        {"event": "artifact_cleanup_failed", "artifact_id": artifact_id, "path_name": provenance_key},
+                        sort_keys=True,
+                    ),
+                )
+        raise ArtifactStorageError("ARTIFACT_STORAGE_ERROR") from exc
     except Exception:
         db.rollback()
         if artifact_created:

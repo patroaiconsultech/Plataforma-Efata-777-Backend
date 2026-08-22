@@ -1,0 +1,47 @@
+{
+  "package_type": "manual_incremental_github_upload",
+  "generated_at_utc": "2026-08-22T22:06:34.157652+00:00",
+  "repository": "https://github.com/patroaiconsultech/Plataforma-Efata-777-Frontend",
+  "source_candidate": "/home/ubuntu/efata-frontend-final-candidate",
+  "baseline_commit": "04d616e4db8f6fb845b0ec957c086c145a6eb90c",
+  "candidate_head_at_packaging": "04d616e4db8f6fb845b0ec957c086c145a6eb90c",
+  "observed_remote_main_at_packaging": "57a93f5291e5a130c14fa282d067622f64f5f360",
+  "scope_policy": "Only the explicitly listed modified files are included; no generated output, caches, secrets, or prior release files.",
+  "files": [
+    {
+      "path": "src/routes/AppConsole.tsx",
+      "bytes": 100187,
+      "baseline_sha256": "5b14185398713e3766fb674639edffdcc98b97510537fe168c4294e7470a47cc",
+      "current_worktree_sha256": "4d78bf0587f5df974e0a53c5e6fa6af64bb30b2d53a0cab362d4df6c35740182",
+      "status": "modified"
+    },
+    {
+      "path": "tests/final-rc-premium.test.mjs",
+      "bytes": 3537,
+      "baseline_sha256": "640037c678e9bc4e39b12b0b187da20ffed03b3134ef0cdc6bb6de9fe9b782d0",
+      "current_worktree_sha256": "0316bddd2123ce98ecb0a0c79a869828f78fc3afee57a478697b5ffb27a5890f",
+      "status": "modified"
+    },
+    {
+      "path": "src/landing/premiumInteractions.ts",
+      "bytes": 93373,
+      "baseline_sha256": "1acbe858aab65293b513000ce61a04a80eab7f25341eed1055f34ecaa4c8c9e9",
+      "current_worktree_sha256": "ba8401853e17f4701326daba382d2b162bece867dafc4f07653455805625da02",
+      "status": "modified"
+    },
+    {
+      "path": "src/landing/premium.css",
+      "bytes": 142728,
+      "baseline_sha256": "2a6d2ca9d03cece60edb6686a262575dd23a0303a939f4348140dea35fc8447a",
+      "current_worktree_sha256": "1f2c619fb045fef7fdbb839bd726577767f2ea93eb0ac1b4443f30e6db52fd0f",
+      "status": "modified"
+    },
+    {
+      "path": "tests/music-experience.test.mjs",
+      "bytes": 5681,
+      "baseline_sha256": "7f4a70775f3cc17ea729eb0992f47c8a041971815437c5d1e3248285c8bd3487",
+      "current_worktree_sha256": "4b7878fefaa4aae641e7cc6437bfad4f01d09c068c983b77109fc273a20e04f8",
+      "status": "modified"
+    }
+  ]
+}

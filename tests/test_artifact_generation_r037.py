@@ -72,6 +72,11 @@ def test_stream_done_includes_artifact_only_after_generation():
     routes = Path(__file__).parents[1] / "src/orkio_v2/routes.py"
     text = routes.read_text(encoding="utf-8")
     assert 'done_payload["artifact"]=artifact_payload(generated_artifact)' in text
+    assert 'done_payload["artifact_error"] = artifact_error_code' in text
+    assert "ArtifactStorageError" in text
+    service = Path(__file__).parents[1] / "src/orkio_v2/services/artifact_generation.py"
+    service_text = service.read_text(encoding="utf-8")
+    assert "ARTIFACT_STORAGE_ERROR" in service_text
     assert "persist_validated_artifact(" in text
     assert "source_message_sha256=hashlib.sha256(payload.content.encode" in text
 

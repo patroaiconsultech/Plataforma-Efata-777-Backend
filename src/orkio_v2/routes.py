@@ -48,6 +48,7 @@ from .services.audit_observability import ExecutionObserver
 from .services.agent_availability import availability_for, readiness_probe_for_id
 from .services.artifact_generation import (
     ArtifactGenerationError,
+    ArtifactStorageError,
     artifact_generation_system_message,
     artifact_payload,
     default_filename,
@@ -896,6 +897,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
             return
 
         generated_artifact=None
+        artifact_error_code: str | None = None
         if artifact_allowed and artifact_intent is not None:
             try:
                 validated=render_and_validate(
@@ -919,23 +921,39 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
                     storage=build_blob_storage(settings),
                 )
             except ArtifactGenerationError as exc:
-                observer.fail(getattr(exc, "code", "ARTIFACT_GENERATION_FAILED"))
-                yield sse_event(event(
-                    RuntimeEventType.ERROR,
-                    code=getattr(exc, "code", "ARTIFACT_GENERATION_FAILED"),
-                    message="Falha ao gerar ou validar o artefato solicitado.",
-                ))
-                yield sse_event(terminal(RuntimeEventType.DONE,status="failed",message_id=message_id))
-                return
+                artifact_error_code = getattr(exc, "code", "ARTIFACT_GENERATION_FAILED")
+                artifact_gate_logger.warning(
+                    "ARTIFACT_OPTIONAL_OUTPUT_FAILED %s",
+                    json.dumps(
+                        {
+                            "event": "artifact_optional_output_failed",
+                            "execution_id": turn.execution_id,
+                            "thread_id": thread_id,
+                            "message_id": message_id,
+                            "error_code": artifact_error_code,
+                            "storage_error": isinstance(exc, ArtifactStorageError),
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                )
             except Exception:
-                observer.fail("ARTIFACT_GENERATION_FAILED")
-                yield sse_event(event(
-                    RuntimeEventType.ERROR,
-                    code="ARTIFACT_GENERATION_FAILED",
-                    message="Falha ao persistir o artefato solicitado.",
-                ))
-                yield sse_event(terminal(RuntimeEventType.DONE,status="failed",message_id=message_id))
-                return
+                artifact_error_code = "ARTIFACT_GENERATION_FAILED"
+                artifact_gate_logger.warning(
+                    "ARTIFACT_OPTIONAL_OUTPUT_FAILED %s",
+                    json.dumps(
+                        {
+                            "event": "artifact_optional_output_failed",
+                            "execution_id": turn.execution_id,
+                            "thread_id": thread_id,
+                            "message_id": message_id,
+                            "error_code": artifact_error_code,
+                            "storage_error": False,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                )
 
         observer.persisted(message_id=message_id)
         observer.complete()
@@ -952,6 +970,8 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
         )
         if generated_artifact is not None:
             done_payload["artifact"]=artifact_payload(generated_artifact)
+        if artifact_error_code is not None:
+            done_payload["artifact_error"] = artifact_error_code
         yield sse_event(terminal(RuntimeEventType.DONE, **done_payload))
 
     return StreamingResponse(events(),media_type="text/event-stream",
