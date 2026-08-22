@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+import re
+import uuid
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .database import Base, engine
@@ -17,6 +19,23 @@ app.include_router(team_router)
 app.include_router(realtime_router)
 app.include_router(voice_router)
 app.include_router(tts_router)
+
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+@app.middleware("http")
+async def request_context_middleware(request: Request, call_next):
+    supplied = request.headers.get("X-Request-ID", "")
+    request_id = supplied if _REQUEST_ID_RE.fullmatch(supplied) else str(uuid.uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "microphone=(self)"
+    return response
+
 
 @app.on_event("startup")
 def startup():

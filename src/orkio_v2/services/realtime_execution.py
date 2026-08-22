@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+import json
+import logging
 
 from sqlalchemy.orm import Session
 
@@ -17,9 +19,11 @@ from .execution_router import resolve_direct_target_decision
 from .hyper_cocreator import hyper_cocreator_system_message, profile_for
 from .github_integration import github_context_messages
 from .internal_consultation import (
+    InternalConsultationError,
     build_internal_consultation_context,
     internal_contribution_messages,
 )
+from .llm_contracts import LLMNotConfigured, LLMUpstreamError
 from .team_runtime import (
     build_team_plan,
     build_team_turn,
@@ -29,6 +33,25 @@ from .team_runtime import (
     team_history,
 )
 from .realtime_segmenter import SentenceSegmenter
+
+realtime_execution_logger = logging.getLogger("uvicorn.error")
+
+
+def _log_optional_failure(*, turn, stage: str, code: str, exc: Exception, index: int | None = None) -> None:
+    metadata: dict[str, object] = {
+        "event": "realtime_optional_failure",
+        "request_id": getattr(turn, "request_id", None),
+        "execution_id": getattr(turn, "execution_id", None),
+        "stage": stage,
+        "error_code": code,
+        "exception_type": type(exc).__name__,
+    }
+    if index is not None:
+        metadata["contributor_index"] = index
+    realtime_execution_logger.warning(
+        "REALTIME_OPTIONAL_FAILURE %s",
+        json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+    )
 
 
 class RealtimeExecutionError(RuntimeError):
@@ -132,10 +155,15 @@ async def execute_realtime_direct(
                     message=transcript,
                 )
                 history = internal_contribution_messages(contributions) + history
-            except Exception:
-                # Internal consultation is an optional enhancement. The public
-                # Realtime response must remain available if a specialist fails.
-                pass
+            except InternalConsultationError as exc:
+                # Internal consultation is optional; the canonical response remains
+                # available, while the sanitized event preserves correlation.
+                _log_optional_failure(
+                    turn=turn,
+                    stage="internal_consultation",
+                    code=getattr(exc, "code", "INTERNAL_CONSULTATION_FAILED"),
+                    exc=exc,
+                )
         if turn.turn_owner_agent_id == "orkio":
             profile = profile_for(
                 db,
@@ -237,10 +265,17 @@ async def execute_realtime_team(
         raise _unexpected_execution_error(stage="history", exc=exc, turn=turn) from exc
 
     contributions: list[tuple[str, str]] = []
-    for agent_id in plan.contributor_agent_ids:
+    for index, agent_id in enumerate(plan.contributor_agent_ids):
         try:
             content = (await llm.generate(settings, agent_id, list(base_history))).strip()
-        except Exception:
+        except (LLMNotConfigured, LLMUpstreamError) as exc:
+            _log_optional_failure(
+                turn=turn,
+                stage="team_contributor",
+                code=type(exc).__name__.upper(),
+                exc=exc,
+                index=index,
+            )
             continue
         if not content:
             continue
@@ -380,10 +415,13 @@ async def stream_realtime_direct(
                     message=transcript,
                 )
                 history = internal_contribution_messages(contributions) + history
-            except Exception:
-                # Specialist consultation is optional; the canonical response
-                # remains available when an internal contributor is unavailable.
-                pass
+            except InternalConsultationError as exc:
+                _log_optional_failure(
+                    turn=turn,
+                    stage="internal_consultation",
+                    code=getattr(exc, "code", "INTERNAL_CONSULTATION_FAILED"),
+                    exc=exc,
+                )
         if turn.turn_owner_agent_id == "orkio":
             profile = profile_for(db, tenant_id=tenant_id, user_id=user_id)
             history.insert(

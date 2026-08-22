@@ -3,12 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import json
+import logging
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..models import Attachment
+from .blob_storage import BlobStorage, BlobStorageError
+
+attachment_logger = logging.getLogger("uvicorn.error")
 
 
 STORAGE_KEY_UNIQUE_CONSTRAINT = "attachments_storage_key_key"
@@ -93,7 +98,8 @@ def persist_attachment(
     data: bytes,
     sha256: str,
     storage_key: str,
-    target: Path,
+    target: Path | None = None,
+    storage: BlobStorage | None = None,
 ) -> AttachmentPersistResult:
     """Persist one logical attachment idempotently within tenant/thread scope.
 
@@ -117,11 +123,23 @@ def persist_attachment(
             sha256=sha256,
         ):
             raise AttachmentIdentityConflict("ATTACHMENT_IDENTITY_CONFLICT")
-        _ensure_blob(target, data)
+        if storage is not None:
+            storage.put_if_absent(storage_key, data, content_type=mime_type)
+        elif target is not None:
+            _ensure_blob(target, data)
+        else:
+            raise BlobStorageError("STORAGE_BACKEND_REQUIRED")
         return AttachmentPersistResult(existing, created=False, reused=True)
 
-    target_existed_before = target.exists()
-    _ensure_blob(target, data)
+    target_existed_before = target.exists() if target is not None else False
+    blob_created = False
+    if storage is not None:
+        blob_created = storage.put_if_absent(storage_key, data, content_type=mime_type)
+    elif target is not None:
+        _ensure_blob(target, data)
+        blob_created = not target_existed_before
+    else:
+        raise BlobStorageError("STORAGE_BACKEND_REQUIRED")
 
     row = Attachment(
         tenant_id=tenant_id,
@@ -168,8 +186,20 @@ def persist_attachment(
             thread_id=thread_id,
             storage_key=storage_key,
         )
-        if canonical is None and not target_existed_before:
-            target.unlink(missing_ok=True)
+        if canonical is None and blob_created:
+            if storage is not None:
+                try:
+                    storage.delete(storage_key)
+                except BlobStorageError:
+                    attachment_logger.warning(
+                        "ATTACHMENT_CLEANUP_FAILED %s",
+                        json.dumps(
+                            {"event": "attachment_cleanup_failed", "storage_key": storage_key},
+                            sort_keys=True,
+                        ),
+                    )
+            elif target is not None:
+                target.unlink(missing_ok=True)
         raise
 
     return AttachmentPersistResult(row, created=True, reused=False)

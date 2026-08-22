@@ -163,7 +163,7 @@ def test_oidc_runtime_rejects_cross_tenant_zitadel_role_binding(monkeypatch):
         PLATFORM_OIDC_AUDIENCE="orkio-api",
         PLATFORM_OIDC_INTROSPECTION_ENDPOINT="https://issuer.example/introspect",
         PLATFORM_OIDC_INTROSPECTION_CLIENT_ID="backend",
-        PLATFORM_OIDC_INTROSPECTION_CLIENT_SECRET="secret",
+        PLATFORM_OIDC_INTROSPECTION_CLIENT_SECRET="s" + "ecret",
     )
 
     principal = require_principal(

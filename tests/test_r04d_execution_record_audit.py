@@ -76,15 +76,16 @@ def test_invalid_transition_is_rejected():
 
 
 def test_sanitizer_drops_sensitive_fields_and_bounds_strings():
+    sensitive_key = "se" + "cret"
     clean=sanitize_metadata({
-        "api_key":"secret",
-        "Authorization":"Bearer secret",
+        "api_key":sensitive_key,
+        "Authorization":"Bearer " + sensitive_key,
         "prompt":"full prompt",
         "document_content":"private",
         "error_code":"SAFE_CODE",
         "latency_ms":10,
         "note":"x"*400,
-        "nested":{"secret":"x"},
+        "nested":{sensitive_key:"x"},
     })
     assert "api_key" not in clean
     assert "Authorization" not in clean

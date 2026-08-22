@@ -8,13 +8,13 @@ import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from xml.etree import ElementTree as ET
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..models import Attachment
+from .blob_storage import BlobStorageError, build_blob_storage
 from .document_ingestion_security import (
     ArchiveMemberTooLarge,
     ArchiveRequiredMemberInvalid,
@@ -383,10 +383,10 @@ def build_document_context(
     any_aggregate_truncated = False
     successful_sources = 0
 
+    storage = build_blob_storage(settings)
     for attachment in rows:
         try:
-            target = _safe_storage_path(settings, attachment.storage_key)
-            raw = target.read_bytes()
+            raw = storage.get(attachment.storage_key)
             digest = hashlib.sha256(raw).hexdigest()
             if digest != attachment.sha256:
                 raise DocumentIntegrityError("DOCUMENT_SHA256_MISMATCH")
@@ -475,9 +475,26 @@ def build_document_context(
                     sort_keys=True,
                 ),
             )
+        except BlobStorageError as exc:
+            errors.append(
+                {
+                    "attachment_id": attachment.id,
+                    "filename": attachment.filename,
+                    "code": "DOCUMENT_STORAGE_UNAVAILABLE" if str(exc) != "BLOB_NOT_FOUND" else "DOCUMENT_FILE_NOT_FOUND",
+                }
+            )
+            document_context_logger.warning(
+                "DOCUMENT_CONTEXT_STORAGE_FAILED %s",
+                json.dumps(
+                    {"event": "document_context_storage_failed", "attachment_id": attachment.id, "error_code": errors[-1]["code"]},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
         except DocumentContextError as exc:
             code = str(exc) or exc.code
             errors.append({"attachment_id": attachment.id, "code": code})
+
             document_context_logger.warning(
                 "DOCUMENT_CONTEXT_FAILED %s",
                 json.dumps(

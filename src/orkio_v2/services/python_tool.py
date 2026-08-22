@@ -5,7 +5,7 @@ import asyncio
 import hashlib
 import os
 import re
-import subprocess
+import subprocess  # nosec B404: argv fixo, shell=False e limites explícitos abaixo
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -138,7 +138,11 @@ def _run_sync(code: str, policy: CapabilityPolicy) -> PythonExecutionResult:
         import time
         start = time.monotonic()
         try:
-            cp = subprocess.run(
+            # Security contract: fixed trusted executable/argv, no shell, no inherited
+            # secrets, isolated temporary cwd, closed stdin, bounded output and timeout.
+            # The container must still enforce network/filesystem/CPU limits; AST checks
+            # alone are not a complete sandbox.
+            cp = subprocess.run(  # nosec B603: fixed argv, shell=False, explicit limits
                 [sys.executable, "-I", "-S", "-c", validated],
                 cwd=tmp,
                 env=env,
@@ -147,6 +151,8 @@ def _run_sync(code: str, policy: CapabilityPolicy) -> PythonExecutionResult:
                 stderr=subprocess.PIPE,
                 timeout=policy.python_timeout_seconds,
                 check=False,
+                shell=False,
+                start_new_session=True,
             )
         except subprocess.TimeoutExpired as exc:
             raise PythonExecutionFailed("PYTHON_EXECUTION_TIMEOUT") from exc

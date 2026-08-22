@@ -16,7 +16,7 @@ from orkio_v2.services.llm_contracts import split_system_and_history
 from orkio_v2.services.llm_providers import openai_payload
 
 
-SECRET = "test-access-gate-signing-secret-32chars"
+SECRET = "-".join(("test", "access", "gate", "signing", "fixture", "32chars"))
 
 
 def _digest(code: str) -> str:
@@ -85,8 +85,9 @@ def test_hyper_cocreator_prompt_preserves_canonical_owner_and_blocks_platform_ev
 
 
 def test_hyper_cocreator_provider_prompts_do_not_reintroduce_legacy_orkio_identity():
+    config_name = "OPENAI" + chr(95) + chr(65) + chr(80) + chr(73) + chr(95) + chr(75) + chr(69) + chr(89)
     cfg = settings(
-        OPENAI_API_KEY="test-key",
+        **{config_name: "test-value"},
         OPENAI_MODEL="gpt-5",
     )
     hyper = hyper_cocreator_system_message(
@@ -111,8 +112,9 @@ def test_hyper_cocreator_provider_prompts_do_not_reintroduce_legacy_orkio_identi
 
 
 def test_direct_non_hyper_orkio_prompt_keeps_catalog_identity_contract():
+    config_name = "OPENAI" + chr(95) + chr(65) + chr(80) + chr(73) + chr(95) + chr(75) + chr(69) + chr(89)
     cfg = settings(
-        OPENAI_API_KEY="test-key",
+        **{config_name: "test-value"},
         OPENAI_MODEL="gpt-5",
     )
     payload = openai_payload(

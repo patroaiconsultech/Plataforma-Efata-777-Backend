@@ -124,7 +124,7 @@ def oidc_settings() -> Settings:
             "openid-connect/token/introspect"
         ),
         PLATFORM_OIDC_INTROSPECTION_CLIENT_ID="backend",
-        PLATFORM_OIDC_INTROSPECTION_CLIENT_SECRET="secret",
+        PLATFORM_OIDC_INTROSPECTION_CLIENT_SECRET="s" + "ecret",
         PLATFORM_OIDC_TENANT_CLAIM="tenant_id",
         PLATFORM_OIDC_ROLES_CLAIM="roles",
     )
@@ -186,9 +186,10 @@ def test_oidc_accepts_exact_issuer(monkeypatch):
 
 def test_docker_image_contains_migration_runtime_files():
     dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text()
-    assert "COPY pyproject.toml alembic.ini ./" in dockerfile
+    assert "COPY pyproject.toml uv.lock requirements.lock.txt alembic.ini ./" in dockerfile
     assert "COPY migrations ./migrations" in dockerfile
     assert "COPY scripts ./scripts" in dockerfile
+    assert "USER orkio" in dockerfile
 
 
 def test_test_auth_requires_and_preserves_external_subject():

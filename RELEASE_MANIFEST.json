@@ -1,0 +1,166 @@
+{
+  "authentication_release_policy": "OIDC/ZITADEL only; first-party authentication excluded",
+  "base_sha": "d2ffe9a589cd6374beaffe0455fb084138ed6dd3",
+  "candidate_head": "d2ffe9a589cd6374beaffe0455fb084138ed6dd3",
+  "file_count": 31,
+  "files": [
+    {
+      "bytes": 3708,
+      "path": ".github/workflows/01-backend-ci.yml",
+      "sha256": "a16b8312e0d660d788cb6970c043b0dce9cbe551f44cdb20fad7849029e2f472"
+    },
+    {
+      "bytes": 7537,
+      "path": ".github/workflows/02-backend-security.yml",
+      "sha256": "9d83a7860064cbd4b6dde85106f080795f7aeb69d71856ccdee4b255ed849e75"
+    },
+    {
+      "bytes": 2946,
+      "path": ".secrets.baseline",
+      "sha256": "0c669f47ca2f44691ad37c4cd6a9d77d99b39c37065fad307c4f330535899292"
+    },
+    {
+      "bytes": 1551,
+      "path": "Dockerfile",
+      "sha256": "dc23056138020e3d4edffa3100d98d38bd9aa210924f95c60bcccced7fd138c7"
+    },
+    {
+      "bytes": 14266,
+      "path": "docs/EFATA_PREMIUM_ENVIRONMENT_VARIABLES.md",
+      "sha256": "4a4a68e14d537c608ff136df7d4fe3fe67f6283c2afbf5526b5cade29dce7ffd"
+    },
+    {
+      "bytes": 971,
+      "path": "pyproject.toml",
+      "sha256": "9e1843b060634a1864862e2123b8b0091bded50e6b910762b683336a03ff1e8f"
+    },
+    {
+      "bytes": 33913,
+      "path": "requirements-test.lock.txt",
+      "sha256": "bf1a7b294e9c2a6eb56102cd3db589bd687776b78f88af8328ce88f5c51b97f3"
+    },
+    {
+      "bytes": 32787,
+      "path": "requirements.lock.txt",
+      "sha256": "2a325d805a16c07f61ccd890087b39a653eceb87faaa23b5aab5e662a25fa01e"
+    },
+    {
+      "bytes": 3121,
+      "path": "scripts/generate_release_manifest.py",
+      "sha256": "43bb60cdb0dfebceadc932445aa1c0dcb6ba20c325605e74c3b554b2c7953713"
+    },
+    {
+      "bytes": 2822,
+      "path": "src/orkio_v2/agents/catalog.py",
+      "sha256": "0501ac052def8df83453830e666c77bcfded210a6dc2a097d0ae55223d26410e"
+    },
+    {
+      "bytes": 18849,
+      "path": "src/orkio_v2/config.py",
+      "sha256": "8579a75571311a85667f46edc5cf93d425291608ddf1b4a2ca323f4d32358a0f"
+    },
+    {
+      "bytes": 1780,
+      "path": "src/orkio_v2/main.py",
+      "sha256": "d12dc06cde2aef59f2eaef5735557d3198eb92e879ecb7b067cd95c6d5222216"
+    },
+    {
+      "bytes": 45877,
+      "path": "src/orkio_v2/routes.py",
+      "sha256": "28b3b4dcd15315dedfd8c802f146ad42b99ec304bcffa9229bc2748504afd3fe"
+    },
+    {
+      "bytes": 21632,
+      "path": "src/orkio_v2/services/artifact_generation.py",
+      "sha256": "2f767d7f0031fcc9cb3486da623bf65a3e530a619a8b9d4c45f3293da748b6a9"
+    },
+    {
+      "bytes": 6074,
+      "path": "src/orkio_v2/services/attachment_service.py",
+      "sha256": "ab77f3c757a5c959e81c6d9501bea181135988c975b344a7978523e9ef6560f7"
+    },
+    {
+      "bytes": 5674,
+      "path": "src/orkio_v2/services/blob_storage.py",
+      "sha256": "15aa4f5e5f1b03bb3d428070ad0d5a9a379b9dc11039b2801cab41c7e023e5d5"
+    },
+    {
+      "bytes": 21886,
+      "path": "src/orkio_v2/services/document_context.py",
+      "sha256": "09830a0d4cfd0af3f5ac8c12983d59f1e10618e6ad8a1ed5753ab4624c06bdb0"
+    },
+    {
+      "bytes": 7490,
+      "path": "src/orkio_v2/services/python_tool.py",
+      "sha256": "7552982479e003239cb84affea6ceca18c8083b0fd8fa452185f16ab2dd433f0"
+    },
+    {
+      "bytes": 17258,
+      "path": "src/orkio_v2/services/realtime_execution.py",
+      "sha256": "06b403277209fa30fc59f99ff0adb1473aac6959761a10af3ba8c6288f33a72f"
+    },
+    {
+      "bytes": 4307,
+      "path": "tests/test_blob_storage.py",
+      "sha256": "b4d706dbe0f5b3a45b69fb7211906638d72ac8c679cd175a96598062a6fc1cc9"
+    },
+    {
+      "bytes": 1849,
+      "path": "tests/test_bootstrap_identity_diagnostics.py",
+      "sha256": "8c28703ec3cc143fac99d4dab456a48c3e5cc12f8cd9d2077f4c97402eed68d8"
+    },
+    {
+      "bytes": 13107,
+      "path": "tests/test_github_readonly_hardening.py",
+      "sha256": "aaa51ea8bb62b6436a4207fd47b99b80d6daa21c1bde47895ee4ece3592623df"
+    },
+    {
+      "bytes": 4546,
+      "path": "tests/test_hyper_cocreator.py",
+      "sha256": "56867fb13c1d7600a0499b58046de0b8906b2eae110bfe720afd52dcd9ee1688"
+    },
+    {
+      "bytes": 5257,
+      "path": "tests/test_identity_authorization_runtime.py",
+      "sha256": "5c45baae45a1416fd201f9a9a24b639c862874e8446c39a254c55773b00a8dda"
+    },
+    {
+      "bytes": 4823,
+      "path": "tests/test_internal_consultation_governance.py",
+      "sha256": "a0a121e5981f03d19d98e3b54aa96040d24a4c30e06d7056457a867a1c7b58ea"
+    },
+    {
+      "bytes": 7171,
+      "path": "tests/test_predeploy_hardening.py",
+      "sha256": "26f4b847750d4654de8e7f8d624a4bbb223e9135b0bf061999419116c502ebc1"
+    },
+    {
+      "bytes": 4387,
+      "path": "tests/test_r04d_execution_record_audit.py",
+      "sha256": "40384f00f12e5c68e68bc0634ad142df29437dd990262e9591871f7be7a60e37"
+    },
+    {
+      "bytes": 2924,
+      "path": "tests/test_security.py",
+      "sha256": "6267c30dc1c2732bc7ea9359564245d6ac677c10c91415dd7310dd1446f1e65f"
+    },
+    {
+      "bytes": 2043,
+      "path": "tests/test_stt_packaging_contract.py",
+      "sha256": "8fa8a87c4c5f5e6c1fe1b99b63456a5187b2667344abbb0759c764c44b2bd49a"
+    },
+    {
+      "bytes": 19080,
+      "path": "tests/test_voice_stt_runtime.py",
+      "sha256": "d4c0d9744ba7d05036093ebb17a070878802b33e0af532e36f69686c7721a2be"
+    },
+    {
+      "bytes": 121779,
+      "path": "uv.lock",
+      "sha256": "1d725e7ad78a9d9dde7e5d6c888ebff986fb6ae39010f832eb8802405cc4357b"
+    }
+  ],
+  "package": "backend",
+  "repository": "patroaiconsultech/Plataforma-Efata-777-Backend",
+  "schema": "efata.premium.release.v2"
+}

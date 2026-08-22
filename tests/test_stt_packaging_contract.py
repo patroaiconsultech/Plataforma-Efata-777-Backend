@@ -5,15 +5,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_docker_installs_stt_extra_and_runs_import_smoke():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "pip install --no-cache-dir '.[stt]'" in dockerfile
+    assert "pip install --no-cache-dir --require-hashes -r requirements.lock.txt" in dockerfile
     assert "import faster_whisper; import orkio_v2.main" in dockerfile
+    assert "PYTHONPATH=/app/src" in dockerfile
 
 
 def test_docker_has_optional_build_time_model_prewarm():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert 'ARG ORKIO_STT_PREWARM_MODEL=""' in dockerfile
     assert "python scripts/prewarm_stt.py" in dockerfile
-    assert "PLATFORM_STT_MODEL_CACHE_DIR=/opt/orkio/models/faster-whisper" in dockerfile
+    assert "PLATFORM_STT_MODEL_CACHE_DIR=" + "/opt/orkio/models/faster-whisper" in dockerfile
 
 
 def test_prewarm_script_is_packaged_in_source_tree():

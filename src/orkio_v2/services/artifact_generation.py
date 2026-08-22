@@ -9,13 +9,14 @@ import uuid
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from xml.etree import ElementTree as ET
-from xml.sax.saxutils import escape
+from defusedxml import ElementTree as DefusedET
+from xml.sax.saxutils import escape  # nosec B406: serializer de XML gerado, não parser de entrada
 
 from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..models import Artifact
+from .blob_storage import BlobStorage, BlobStorageError, build_blob_storage
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 TXT_MIME = "text/plain"
@@ -357,8 +358,13 @@ def _extract_docx_text(data: bytes) -> str:
         raise ArtifactValidationFailed("ARTIFACT_DOCX_OPEN_FAILED") from exc
 
     try:
-        root = ET.fromstring(raw)
-    except ET.ParseError as exc:
+        root = DefusedET.fromstring(
+            raw,
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except DefusedET.ParseError as exc:
         raise ArtifactValidationFailed("ARTIFACT_DOCX_XML_INVALID") from exc
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
     text = "\n".join((node.text or "") for node in root.iter(f"{ns}t")).strip()
@@ -454,16 +460,12 @@ def persist_validated_artifact(
     source_message_sha256: str,
     source_response_message_id: str,
     agent_id: str,
+    storage: BlobStorage | None = None,
 ) -> PersistedArtifact:
-    root = Path(settings.artifact_storage_path).resolve()
+    storage = storage or build_blob_storage(settings)
     artifact_id = str(uuid.uuid4())
     key = f"{tenant_id}/{thread_id}/generated/{artifact_id}-{validated.filename}"
-    target = (root / key).resolve()
-    if not str(target).startswith(str(root) + "/"):
-        raise ArtifactStorageError("ARTIFACT_STORAGE_PATH_INVALID")
-
-    sidecar = target.with_suffix(target.suffix + ".provenance.json")
-    target.parent.mkdir(parents=True, exist_ok=True)
+    provenance_key = key + ".provenance.json"
     metadata = {
         "artifact_id": artifact_id,
         "tenant_id": tenant_id,
@@ -481,11 +483,10 @@ def persist_validated_artifact(
         "proposal_only": False,
     }
 
-    tmp = target.with_suffix(target.suffix + ".tmp")
+    artifact_created = False
+    provenance_created = False
     try:
-        tmp.write_bytes(validated.data)
-        # Reopen exactly the final bytes before DB persistence.
-        final_bytes = tmp.read_bytes()
+        final_bytes = validated.data
         if hashlib.sha256(final_bytes).hexdigest() != validated.sha256:
             raise ArtifactValidationFailed("ARTIFACT_FINAL_BYTES_HASH_MISMATCH")
         if validated.mime_type == DOCX_MIME:
@@ -501,8 +502,17 @@ def persist_validated_artifact(
         elif validated.mime_type in {TXT_MIME, MARKDOWN_MIME}:
             if not final_bytes.decode("utf-8").strip():
                 raise ArtifactValidationFailed("ARTIFACT_FINAL_TEXT_EMPTY")
-        tmp.replace(target)
-        sidecar.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        artifact_created = storage.put_if_absent(
+            key, final_bytes, content_type=validated.mime_type
+        )
+        stored_bytes = storage.get(key)
+        if hashlib.sha256(stored_bytes).hexdigest() != validated.sha256:
+            raise ArtifactValidationFailed("ARTIFACT_STORED_BYTES_HASH_MISMATCH")
+        provenance_created = storage.put_if_absent(
+            provenance_key,
+            json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"),
+            content_type="application/json",
+        )
 
         row = Artifact(
             id=artifact_id,
@@ -519,17 +529,34 @@ def persist_validated_artifact(
         db.commit()
     except Exception:
         db.rollback()
-        for path in (tmp, target, sidecar):
+        if artifact_created:
             try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                pass
+                storage.delete(key)
+            except BlobStorageError:
+                artifact_runtime_logger.warning(
+                    "ARTIFACT_CLEANUP_FAILED %s",
+                    json.dumps(
+                        {"event": "artifact_cleanup_failed", "artifact_id": artifact_id, "path_name": key},
+                        sort_keys=True,
+                    ),
+                )
+        if provenance_created:
+            try:
+                storage.delete(provenance_key)
+            except BlobStorageError:
+                artifact_runtime_logger.warning(
+                    "ARTIFACT_CLEANUP_FAILED %s",
+                    json.dumps(
+                        {"event": "artifact_cleanup_failed", "artifact_id": artifact_id, "path_name": provenance_key},
+                        sort_keys=True,
+                    ),
+                )
         raise
 
     result = PersistedArtifact(
         artifact=row,
         download_path=f"/api/v2/artifacts/{row.id}/download",
-        provenance_path=str(sidecar),
+        provenance_path=provenance_key,
     )
     artifact_runtime_logger.info(
         "ARTIFACT_PERSISTED %s",

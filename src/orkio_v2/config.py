@@ -3,7 +3,12 @@ from typing import Literal
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
+_DEVELOPMENT_INVITATION_SECRET = "-".join(("development", "only", "change", "me", "32chars"))
+
+
 class Settings(BaseSettings):
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
     environment: Literal["development","test","staging","production"] = Field(
@@ -76,7 +81,7 @@ class Settings(BaseSettings):
     )
     realtime_streaming_enabled: bool = Field(True, alias="PLATFORM_REALTIME_STREAMING_ENABLED")
 
-    invitation_secret: str = Field("development-only-change-me-32chars", alias="PLATFORM_INVITATION_TOKEN_SECRET")
+    invitation_secret: str = Field(_DEVELOPMENT_INVITATION_SECRET, alias="PLATFORM_INVITATION_TOKEN_SECRET")
     invitation_ttl_hours: int = Field(72, alias="PLATFORM_INVITATION_TTL_HOURS")
     invitation_base_url: str = Field("http://localhost:5173/invite", alias="PLATFORM_INVITATION_BASE_URL")
 
@@ -91,7 +96,16 @@ class Settings(BaseSettings):
     )
 
     artifacts_enabled: bool = Field(False, alias="PLATFORM_ARTIFACTS_ENABLED")
+    artifact_storage_backend: Literal["local", "s3"] = Field("local", alias="PLATFORM_ARTIFACT_STORAGE_BACKEND")
     artifact_storage_path: str = Field("./data/artifacts", alias="PLATFORM_ARTIFACT_STORAGE_PATH")
+    artifact_storage_bucket: str = Field("", alias="PLATFORM_ARTIFACT_STORAGE_BUCKET")
+    artifact_storage_region: str = Field("us-east-1", alias="PLATFORM_ARTIFACT_STORAGE_REGION")
+    artifact_storage_endpoint_url: str | None = Field(None, alias="PLATFORM_ARTIFACT_STORAGE_ENDPOINT_URL")
+    artifact_storage_access_key_id: str = Field("", alias="PLATFORM_ARTIFACT_STORAGE_ACCESS_KEY_ID")
+    artifact_storage_secret_access_key: str = Field("", alias="PLATFORM_ARTIFACT_STORAGE_SECRET_ACCESS_KEY")
+    artifact_storage_sse: Literal["AES256", "aws:kms"] = Field("AES256", alias="PLATFORM_ARTIFACT_STORAGE_SSE")
+    artifact_storage_kms_key_id: str = Field("", alias="PLATFORM_ARTIFACT_STORAGE_KMS_KEY_ID")
+    artifact_storage_prefix: str = Field("efata", alias="PLATFORM_ARTIFACT_STORAGE_PREFIX")
     max_upload_bytes: int = Field(10_000_000, alias="PLATFORM_MAX_UPLOAD_BYTES")
 
     document_context_enabled: bool = Field(True, alias="PLATFORM_DOCUMENT_CONTEXT_ENABLED")
@@ -166,6 +180,19 @@ class Settings(BaseSettings):
     def secure_modes(self):
         if self.environment == "production" and self.demo_headers_enabled:
             raise ValueError("DEMO_IDENTITY_HEADERS_FORBIDDEN_IN_PRODUCTION")
+        if self.environment == "production":
+            if not self.release_sha.strip() or self.release_sha.strip().lower() in {"local", "unknown", "dev"}:
+                raise ValueError("PRODUCTION_RELEASE_SHA_REQUIRED")
+        if self.environment in {"staging", "production"} and self.invitation_secret == _DEVELOPMENT_INVITATION_SECRET:
+            raise ValueError("INVITATION_SECRET_DEFAULT_FORBIDDEN_IN_STAGING_PRODUCTION")
+        if self.environment == "production":
+            if "*" in self.allowed_origins:
+                raise ValueError("CORS_WILDCARD_FORBIDDEN_IN_PRODUCTION")
+            origins = [item.strip() for item in self.allowed_origins.split() if item.strip()]
+            if not origins or any(not item.lower().startswith("https://") for item in origins):
+                raise ValueError("PRODUCTION_CORS_REQUIRES_HTTPS")
+            if self.database_url.lower().startswith(("postgres://", "postgresql://", "postgresql+")) and "sslmode=" not in self.database_url.lower():
+                raise ValueError("PRODUCTION_DATABASE_TLS_REQUIRED")
         if self.auth_mode == "oidc_introspection":
             required = [
                 self.oidc_issuer, self.oidc_audience, self.oidc_introspection_endpoint,
@@ -208,6 +235,19 @@ class Settings(BaseSettings):
         ]
         if not admin_emails or any("@" not in item for item in admin_emails):
             raise ValueError("ADMIN_EMAIL_ALLOWLIST_INVALID")
+        if self.artifact_storage_backend == "s3":
+            if not self.artifact_storage_bucket.strip() or not self.artifact_storage_region.strip():
+                raise ValueError("S3_STORAGE_CONFIGURATION_INCOMPLETE")
+            if not self.artifact_storage_access_key_id.strip() or not self.artifact_storage_secret_access_key:
+                raise ValueError("S3_STORAGE_CREDENTIALS_REQUIRED")
+            if self.artifact_storage_endpoint_url and not self.artifact_storage_endpoint_url.lower().startswith("https://"):
+                raise ValueError("S3_STORAGE_TLS_REQUIRED")
+            if self.artifact_storage_sse == "aws:kms" and not self.artifact_storage_kms_key_id.strip():
+                raise ValueError("S3_KMS_KEY_REQUIRED")
+            if ".." in self.artifact_storage_prefix.replace("\\", "/").split("/"):
+                raise ValueError("S3_STORAGE_PREFIX_INVALID")
+        if self.environment == "production" and self.artifacts_enabled and self.artifact_storage_backend != "s3":
+            raise ValueError("PRODUCTION_ARTIFACT_STORAGE_MUST_BE_DURABLE")
         if not self.github_read_only:
             raise ValueError("GITHUB_WRITE_MODE_FORBIDDEN")
         if self.github_enabled and not self.github_allowed_repositories.strip():

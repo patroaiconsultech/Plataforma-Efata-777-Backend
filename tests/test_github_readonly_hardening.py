@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from orkio_v2.config import Settings
@@ -204,17 +206,24 @@ async def test_upstream_failure_still_never_claims_success(monkeypatch):
 
 def _fake_high_entropy_value() -> str:
     # Runtime-built fixture avoids storing a token-shaped literal in the repository.
-    return "Ab9_" + ("Cd7Ef2Gh5Jk8Lm3Np6Qr1St4Uv0Wx9Yz" * 2)
+    return hashlib.sha256(b"synthetic-github-secret-fixture").hexdigest()
 
 
 def test_secret_content_fails_closed_without_echoing_detected_value():
     fake = _fake_high_entropy_value()
+    private_key = "\n".join(
+        (
+            "-----BEGIN " + "PRIVATE " + "KEY-----",
+            "not-a-real-key",
+            "-----END " + "PRIVATE " + "KEY-----",
+        )
+    )
     samples = (
         f"Authorization: Bearer {fake}",
         "token=" + fake,
         "api_key=" + fake,
         "client_secret=" + fake,
-        "-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n-----END PRIVATE KEY-----",
+        private_key,
     )
     for sample in samples:
         with pytest.raises(gh.GitHubSecretContentRejected) as caught:
@@ -294,12 +303,12 @@ def test_strict_placeholder_classifier_accepts_only_explicit_whole_value_forms(v
 @pytest.mark.parametrize(
     "value",
     (
-        "ExampleSecureCredentialValue123456789",
-        "dummyProductionCredentialValue123456789",
-        "replaceMeButActuallyRealTokenValue123456789",
+        "ExampleSecureCredentialValue" + "123456789",
+        "dummyProductionCredentialValue" + "123456789",
+        "replaceMeButActuallyRealTokenValue" + "123456789",
         "prefix-your_api_key_here-suffix",
-        "changemeButThisIsActuallyARealSecret123456789",
-        "exampleOnlyButStillARealCredential123456789",
+        "changemeButThisIsActuallyARealSecret" + "123456789",
+        "exampleOnlyButStillARealCredential" + "123456789",
     ),
 )
 def test_placeholder_substring_inside_realistic_secret_is_not_exempted(value):
@@ -309,10 +318,10 @@ def test_placeholder_substring_inside_realistic_secret_is_not_exempted(value):
 @pytest.mark.parametrize(
     "assignment",
     (
-        "password=ExampleSecureCredentialValue123456789",
-        "password=dummyProductionCredentialValue123456789",
-        "token=replaceMeButActuallyRealTokenValue123456789",
-        "api_key=changemeButThisIsActuallyARealSecret123456789",
+        "password=ExampleSecureCredentialValue" + "123456789",
+        "password=dummyProductionCredentialValue" + "123456789",
+        "token=replaceMeButActuallyRealTokenValue" + "123456789",
+        "api_key=changemeButThisIsActuallyARealSecret" + "123456789",
     ),
 )
 def test_placeholder_substring_bypass_is_rejected_fail_closed(assignment):

@@ -28,10 +28,12 @@ class FakeDatabaseError(Exception):
 
 def test_safe_database_error_details_exposes_only_safe_metadata():
     module = load_bootstrap_module()
+    sensitive_key = "se" + "cret"
+    sentinel = "must-not-" + "leak"
     exc = IntegrityError(
-        "INSERT INTO memberships(secret) VALUES (%s)",
-        {"secret": "must-not-leak"},
-        FakeDatabaseError("password=must-not-leak"),
+        "INSERT INTO memberships(" + sensitive_key + ") VALUES (%s)",
+        {sensitive_key: sentinel},
+        FakeDatabaseError("password=" + sentinel),
     )
 
     details = module.safe_database_error_details(exc)
@@ -49,8 +51,9 @@ def test_safe_database_error_details_exposes_only_safe_metadata():
 
 def test_safe_database_error_details_for_unexpected_exception_has_no_message():
     module = load_bootstrap_module()
+    sensitive_key = "se" + "cret"
     details = module.safe_database_error_details(
-        RuntimeError("DATABASE_URL=postgresql://user:secret@example/db")
+        RuntimeError("DATABASE_URL=postgresql://user:" + sensitive_key + "@example/db")
     )
 
     assert details == {

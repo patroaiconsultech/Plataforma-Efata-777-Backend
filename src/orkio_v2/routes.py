@@ -1,7 +1,7 @@
 import asyncio, hashlib, json, logging
 from pathlib import Path, PurePosixPath
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select, text, func
 from sqlalchemy.orm import Session
 from .auth import Principal, require_principal
@@ -31,6 +31,7 @@ from .services.document_context import build_document_context, document_context_
 from .services.artifact_context import artifact_context_message
 from .services.platform_knowledge import platform_knowledge_message
 from .services.attachment_service import AttachmentIdentityConflict, persist_attachment
+from .services.blob_storage import BlobStorageError, build_blob_storage
 from .agents.registry import AgentNotFound, list_agents
 from .services.execution_router import resolve_direct_target_decision
 from .services.target_resolver import TargetAmbiguous, TargetNotFound
@@ -915,6 +916,7 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
                     source_message_sha256=hashlib.sha256(payload.content.encode("utf-8")).hexdigest(),
                     source_response_message_id=message_id,
                     agent_id=turn.turn_owner_agent_id,
+                    storage=build_blob_storage(settings),
                 )
             except ArtifactGenerationError as exc:
                 observer.fail(getattr(exc, "code", "ARTIFACT_GENERATION_FAILED"))
@@ -1021,9 +1023,12 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
             sha256=digest,
             storage_key=key,
             target=target,
+            storage=build_blob_storage(settings),
         )
     except AttachmentIdentityConflict as exc:
         raise HTTPException(409,"ATTACHMENT_IDENTITY_CONFLICT") from exc
+    except BlobStorageError as exc:
+        raise HTTPException(503, str(exc)) from exc
     return {
         "id":result.attachment.id,
         "filename":result.attachment.filename,
@@ -1126,19 +1131,22 @@ def download_artifact(
     _,member=thread_access(db,row.thread_id,p)
     if not member.can_download_artifacts:
         raise HTTPException(403,"ARTIFACT_DOWNLOAD_PERMISSION_REQUIRED")
-    root=Path(settings.artifact_storage_path).resolve()
-    target=(root/row.storage_key).resolve()
-    if not str(target).startswith(str(root)+"/"):
-        raise HTTPException(400,"STORAGE_PATH_INVALID")
-    if not target.is_file():
-        raise HTTPException(404,"ARTIFACT_FILE_NOT_FOUND")
-    if hashlib.sha256(target.read_bytes()).hexdigest() != row.sha256:
+    try:
+        raw = build_blob_storage(settings).get(row.storage_key)
+    except BlobStorageError as exc:
+        if str(exc) == "BLOB_NOT_FOUND":
+            raise HTTPException(404,"ARTIFACT_FILE_NOT_FOUND") from exc
+        raise HTTPException(503,"ARTIFACT_STORAGE_UNAVAILABLE") from exc
+    if hashlib.sha256(raw).hexdigest() != row.sha256:
         raise HTTPException(409,"ARTIFACT_INTEGRITY_MISMATCH")
-    return FileResponse(
-        path=target,
+    safe_filename = row.filename.replace(chr(34), "")
+    return Response(
+        content=raw,
         media_type=row.mime_type,
-        filename=row.filename,
-        headers={"Cache-Control":"private, no-store"},
+        headers={
+            "Cache-Control":"private, no-store",
+            "Content-Disposition": f'attachment; filename="{safe_filename}"',
+        },
     )
 
 
