@@ -15,6 +15,7 @@ from .direct_runtime import (
 )
 from .execution_router import resolve_direct_target_decision
 from .hyper_cocreator import hyper_cocreator_system_message, profile_for
+from .github_integration import github_context_messages
 from .internal_consultation import (
     build_internal_consultation_context,
     internal_contribution_messages,
@@ -82,6 +83,7 @@ async def execute_realtime_direct(
     thread_id: str,
     agent_id: str,
     transcript: str,
+    is_admin: bool = False,
 ) -> RealtimeExecutionResult:
     try:
         decision = resolve_direct_target_decision(f"id:{agent_id}", settings)
@@ -112,6 +114,16 @@ async def execute_realtime_direct(
             tenant_id=tenant_id,
             settings=settings,
         )
+        github_messages = (
+            await github_context_messages(
+                settings,
+                message=transcript,
+                is_admin=is_admin,
+            )
+            if getattr(settings, "github_enabled", False)
+            else []
+        )
+        history = list(github_messages) + history
         if settings.internal_agent_consultation_enabled and turn.turn_owner_agent_id == "orkio":
             try:
                 contributions, _ = await build_internal_consultation_context(
@@ -324,6 +336,7 @@ async def stream_realtime_direct(
     thread_id: str,
     agent_id: str,
     transcript: str,
+    is_admin: bool = False,
 ) -> AsyncIterator[dict[str, object]]:
     """Stream governed text and speech segments for the direct Co-Creator turn.
 
@@ -349,6 +362,16 @@ async def stream_realtime_direct(
             tenant_id=tenant_id,
             settings=settings,
         )
+        github_messages = (
+            await github_context_messages(
+                settings,
+                message=transcript,
+                is_admin=is_admin,
+            )
+            if getattr(settings, "github_enabled", False)
+            else []
+        )
+        history = list(github_messages) + history
         if settings.internal_agent_consultation_enabled and turn.turn_owner_agent_id == "orkio":
             try:
                 contributions, _ = await build_internal_consultation_context(

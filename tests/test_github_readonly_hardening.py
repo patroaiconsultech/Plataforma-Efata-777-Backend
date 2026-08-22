@@ -27,6 +27,35 @@ def test_absolute_repository_path_fails_closed():
         gh._safe_path("/src/orkio_v2/routes.py")
 
 
+def test_platform_code_request_selects_both_allowlisted_repositories():
+    assert gh.requested_repositories_from_message(
+        settings(),
+        "Leia o código da plataforma no GitHub e explique os pontos críticos.",
+    ) == (
+        "patroaiconsultech/Plataforma-Efata-777-Backend",
+        "patroaiconsultech/Plataforma-Efata-777-Frontend",
+    )
+
+
+def test_backend_code_request_selects_only_backend_repository():
+    assert gh.requested_repositories_from_message(
+        settings(),
+        "Audite o código do backend atual.",
+    ) == ("patroaiconsultech/Plataforma-Efata-777-Backend",)
+
+
+@pytest.mark.asyncio
+async def test_non_admin_code_request_returns_explicit_refusal():
+    messages = await gh.github_context_messages(
+        settings(),
+        message="Leia o código da plataforma no GitHub.",
+        is_admin=False,
+    )
+    assert len(messages) == 1
+    assert messages[0]["role"] == "system"
+    assert "requires provisioned admin authorization" in messages[0]["content"]
+
+
 @pytest.mark.asyncio
 async def test_snapshot_char_budget_is_strict_and_provenance_discloses_clipping(monkeypatch):
     sha = "a" * 40

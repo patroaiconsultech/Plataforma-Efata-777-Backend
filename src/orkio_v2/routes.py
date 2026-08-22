@@ -622,14 +622,10 @@ async def send_message(thread_id:str,payload:MessageCreate,p:Principal=Depends(r
         if hyper_surface
         else None
     )
-    github_messages = (
-        []
-        if hyper_surface
-        else await github_context_messages(
-            settings,
-            message=payload.content,
-            is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
-        )
+    github_messages = await github_context_messages(
+        settings,
+        message=payload.content,
+        is_admin=is_allowlisted_admin(p, settings),
     )
     capability_messages = await runtime_capability_messages(
         message=payload.content,
@@ -760,14 +756,10 @@ async def stream_message(thread_id:str,payload:MessageCreate,p:Principal=Depends
             if hyper_surface
             else None
         )
-        github_messages = (
-            []
-            if hyper_surface
-            else await github_context_messages(
-                settings,
-                message=payload.content,
-                is_admin=bool({"admin", "orkio_admin"}.intersection(p.roles)),
-            )
+        github_messages = await github_context_messages(
+            settings,
+            message=payload.content,
+            is_admin=is_allowlisted_admin(p, settings),
         )
         capability_messages = await runtime_capability_messages(
             message=payload.content,

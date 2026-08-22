@@ -519,7 +519,7 @@ async def repository_snapshot(
 
 _REPO_ANALYSIS_RE = re.compile(
     r"\b(?:audite|auditar|auditoria|analise|analisar|autoanalise|auto-an[aá]lise|"
-    r"reposit[oó]rio|repositorio|repo|c[oó]digo[- ]fonte|source code)\b",
+    r"reposit[oó]rio|repositorio|repo|c[oó]digo(?:[- ]fonte)?|source code|github)\b",
     re.IGNORECASE,
 )
 
@@ -538,6 +538,12 @@ def requested_repositories_from_message(settings: Settings, message: str) -> tup
         selected.extend(repo for repo in allowed if "backend" in repo.casefold())
     if "frontend" in low:
         selected.extend(repo for repo in allowed if "frontend" in repo.casefold())
+    if (
+        ("github" in low and any(token in low for token in ("código", "codigo", "repo", "reposit")))
+        or "código da plataforma" in low
+        or "codigo da plataforma" in low
+    ):
+        selected.extend(allowed)
     if any(token in low for token in ("ambos", "os dois", "plataforma inteira", "repos atuais")):
         selected.extend(allowed)
     deduped: list[str] = []

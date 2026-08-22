@@ -22,6 +22,7 @@ from .runtime.contracts import CanonicalTurnContext, RuntimeChannel
 from .services.direct_runtime import build_turn as build_direct_turn
 from .services.execution_router import resolve_direct_target_decision
 from .services.identity import require_provisioned_principal
+from .services.hyper_cocreator import is_allowlisted_admin
 from .services.realtime_bridge import (
     RealtimeBridgeError,
     complete_receipt,
@@ -626,6 +627,7 @@ async def realtime_stream_turn(
                 thread_id=thread_id,
                 agent_id=agent_id,
                 transcript=payload.transcript,
+                is_admin=is_allowlisted_admin(p, settings),
             ):
                 item_type = str(item.get("type") or "")
                 if item_type == "segment_ready":
@@ -845,6 +847,7 @@ async def realtime_final_turn(
                 thread_id=thread_id,
                 agent_id=agent_id,
                 transcript=transcript,
+                is_admin=is_allowlisted_admin(p, settings),
             )
 
         route_stage = "complete_receipt"
