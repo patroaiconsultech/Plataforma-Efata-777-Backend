@@ -1,0 +1,33 @@
+{
+  "package_type": "manual_incremental_github_upload",
+  "generated_at_utc": "2026-08-22T22:06:34.120459+00:00",
+  "repository": "https://github.com/patroaiconsultech/Plataforma-Efata-777-Backend",
+  "source_candidate": "/home/ubuntu/efata-backend-security-candidate",
+  "baseline_commit": "d2ffe9a589cd6374beaffe0455fb084138ed6dd3",
+  "candidate_head_at_packaging": "d2ffe9a589cd6374beaffe0455fb084138ed6dd3",
+  "observed_remote_main_at_packaging": "e2b31638eb53b0999d54943d45e78cc1433c92d5",
+  "scope_policy": "Only the explicitly listed modified files are included; no generated output, caches, secrets, or prior release files.",
+  "files": [
+    {
+      "path": "src/orkio_v2/routes.py",
+      "bytes": 46704,
+      "baseline_sha256": "69f04c79a3d25f1d275776c7398e09732076192d121624a570ef20da853852cb",
+      "current_worktree_sha256": "414853f56d494390d894ddf34a974c6ebb0ac02406639bc503f2a3eb16c2081e",
+      "status": "modified"
+    },
+    {
+      "path": "src/orkio_v2/services/artifact_generation.py",
+      "bytes": 22662,
+      "baseline_sha256": "8a4911c01e93fb8070bbb4575c7108331fdb79a31070bd57531f305e07e2d11b",
+      "current_worktree_sha256": "56f53315d32e4825ab9225dc1121dadf9e76e67a30c5c544a76c8e72abd1051a",
+      "status": "modified"
+    },
+    {
+      "path": "tests/test_artifact_generation_r037.py",
+      "bytes": 5709,
+      "baseline_sha256": "b58a031e4eea33f5abf40abe6949b954ba36a89165fde337c7868131abda7766",
+      "current_worktree_sha256": "1a35816cd3a6e7bcb2f08c2a97acf56fef299005e1a864b8dcd4d60628b42a1e",
+      "status": "modified"
+    }
+  ]
+}
