@@ -1,0 +1,29 @@
+diff --git a/src/orkio_v2/agents/catalog.py b/src/orkio_v2/agents/catalog.py
+index 2b1728b..00469b0 100644
+--- a/src/orkio_v2/agents/catalog.py
++++ b/src/orkio_v2/agents/catalog.py
+@@ -11,7 +11,7 @@ CATALOG_SOURCE_ARTIFACT = (
+     "ONBOARDING_LANGUAGE_LOCALIZED_IDENTITIES_PROPOSAL_ONLY.zip"
+ )
+ CATALOG_SOURCE_SHA256 = "babd5952d1fec4cb5bed15b47941433d41a749edc6321339902332452bf0c661"
+-CATALOG_JSON_SHA256 = "759d070ebbec9d730da99c5f69775c0382c5de2d79835ba1baa92ae64367764a"
++CATALOG_JSON_SHA256 = "ba0be8b745e0ad049bf4f99203599273694ce3c911709e6a06366b0c3efae084"
+ _CATALOG_PATH = Path(__file__).with_name("catalog_r034.json")
+ 
+ 
+diff --git a/src/orkio_v2/routes.py b/src/orkio_v2/routes.py
+index 4d26fa3..9dc0123 100644
+--- a/src/orkio_v2/routes.py
++++ b/src/orkio_v2/routes.py
+@@ -1030,7 +1030,10 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
+     key=f"{p.tenant_id}/{thread_id}/{digest}-{safe}"
+     root=Path(settings.artifact_storage_path).resolve()
+     target=(root/key).resolve()
+-    if not str(target).startswith(str(root)+"/"): raise HTTPException(400,"STORAGE_PATH_INVALID")
++    try:
++        target.relative_to(root)
++    except ValueError:
++        raise HTTPException(400,"STORAGE_PATH_INVALID")
+     try:
+         result=persist_attachment(
+             db,

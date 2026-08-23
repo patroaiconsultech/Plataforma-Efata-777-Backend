@@ -1030,7 +1030,10 @@ async def upload_attachment(thread_id:str,file:UploadFile=File(...),p:Principal=
     key=f"{p.tenant_id}/{thread_id}/{digest}-{safe}"
     root=Path(settings.artifact_storage_path).resolve()
     target=(root/key).resolve()
-    if not str(target).startswith(str(root)+"/"): raise HTTPException(400,"STORAGE_PATH_INVALID")
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise HTTPException(400,"STORAGE_PATH_INVALID")
     try:
         result=persist_attachment(
             db,
