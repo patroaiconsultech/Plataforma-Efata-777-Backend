@@ -1,0 +1,31 @@
+{
+  "package": "EFATA_BACKEND_INCREMENTAL_DOCUMENTS_MARKDOWN_RECOVERY_V1",
+  "package_type": "incremental_overlay_only",
+  "source_package": "Plataforma-Efata-777-Backend-main (15).zip",
+  "required_base_commit": "d2ffe9a589cd6374beaffe0455fb084138ed6dd3",
+  "repository": "https://github.com/patroaiconsultech/Plataforma-Efata-777-Backend",
+  "files": [
+    {
+      "path": "src/orkio_v2/routes.py",
+      "sha256": "414853f56d494390d894ddf34a974c6ebb0ac02406639bc503f2a3eb16c2081e",
+      "bytes": 46704,
+      "syntax_compile": "PASS"
+    },
+    {
+      "path": "src/orkio_v2/services/artifact_generation.py",
+      "sha256": "56f53315d32e4825ab9225dc1121dadf9e76e67a30c5c544a76c8e72abd1051a",
+      "bytes": 22662,
+      "syntax_compile": "PASS"
+    },
+    {
+      "path": "tests/test_artifact_generation_r037.py",
+      "sha256": "1a35816cd3a6e7bcb2f08c2a97acf56fef299005e1a864b8dcd4d60628b42a1e",
+      "bytes": 5709,
+      "syntax_compile": "PASS"
+    }
+  ],
+  "critical_warning": "DO NOT deploy this ZIP as a standalone backend source tree.",
+  "production_deploy_authorized": false,
+  "migration_included": false,
+  "runtime_complete": false
+}
