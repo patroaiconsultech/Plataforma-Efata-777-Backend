@@ -1,0 +1,45 @@
+{
+  "package": "PATROAI_NATIVE_AUTH_P0_UPLOAD_ONLY_V1",
+  "generated_at_utc": "2026-08-23T23:25:55.661816+00:00",
+  "target_repository": "https://github.com/patroaiconsultech/Plataforma-Efata-777-Backend",
+  "scope": "AUTH-001 containment only",
+  "runtime_file": "src/orkio_v2/auth_routes.py",
+  "test_file": "tests/test_native_auth_account_claim_p0.py",
+  "behavioral_harness": {
+    "legacy_identity_without_native_credential": {
+      "expected": "409 ACCOUNT_CLAIM_REQUIRED",
+      "actual": "409 ACCOUNT_CLAIM_REQUIRED",
+      "onboarding_calls": 0,
+      "credential_calls": 0,
+      "login_calls": 0,
+      "status": "PASS"
+    },
+    "existing_native_account": {
+      "expected": "409 NATIVE_ACCOUNT_ALREADY_EXISTS",
+      "actual": "409 NATIVE_ACCOUNT_ALREADY_EXISTS",
+      "mutation_calls": 0,
+      "status": "PASS"
+    },
+    "brand_new_identity": {
+      "expected": "normal onboarding -> credential -> login",
+      "actual": "normal onboarding -> credential -> login",
+      "commit_count": 1,
+      "status": "PASS"
+    }
+  },
+  "syntax_compile_auth_routes": "PASS",
+  "repo_full_pytest": "NOT_EXECUTED_NO_EXACT_CURRENT_WORKTREE",
+  "docker_build": "NOT_EXECUTED",
+  "migration_included": false,
+  "database_schema_change": false,
+  "production_write_executed": false,
+  "commit_executed": false,
+  "deploy_executed": false,
+  "remaining_blockers": [
+    "AUTH-002 CSRF defense-in-depth",
+    "AUTH-003 anti-enumeration / lockout DoS",
+    "AUTH-007 deterministic tenant selection",
+    "AUTH-005 bootstrap lifecycle",
+    "full Python 3.12 repository regression on exact current worktree"
+  ]
+}

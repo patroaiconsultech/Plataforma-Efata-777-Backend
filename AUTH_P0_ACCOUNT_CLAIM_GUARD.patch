@@ -1,0 +1,22 @@
+diff --git a/src/orkio_v2/auth_routes.py b/src/orkio_v2/auth_routes.py
+--- a/src/orkio_v2/auth_routes.py
++++ b/src/orkio_v2/auth_routes.py
+@@ -201,13 +201,14 @@ def native_register(
+     email = str(payload.email).strip().lower()
+     existing_user = db.scalar(select(User).where(User.email == email))
+     if existing_user is not None:
+         credential = db.scalar(
+             select(NativeCredential).where(NativeCredential.user_id == existing_user.id)
+         )
+         if credential is not None:
+             raise HTTPException(409, "NATIVE_ACCOUNT_ALREADY_EXISTS")
+-        user_id = existing_user.id
+-        subject = existing_user.external_subject
++        # A normal onboarding grant authorizes entry to the product.
++        # It does not prove ownership of a pre-existing identity.
++        # Existing identities must use a separate, strongly verified
++        # account-claim flow before any NativeCredential is attached.
++        raise HTTPException(409, "ACCOUNT_CLAIM_REQUIRED")
+     else:
+         user_id = str(uuid.uuid4())
+         subject = f"native:{email}"

@@ -7,7 +7,6 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
 from .auth import Principal, require_principal
 from .config import Settings, get_settings
 from .database import get_db
@@ -33,7 +32,6 @@ from .services.native_auth import (
 from .services.email_delivery import EmailDeliveryError, send_resend_email
 from .models import NativeCredential, User
 from .services.hyper_cocreator import AccessGateError, complete_onboarding
-
 router = APIRouter(prefix="/api/v2/auth", tags=["native-auth"])
 
 
@@ -48,7 +46,6 @@ def _session_out(principal: Principal | None) -> NativeSessionOut:
         roles=list(principal.roles),
     )
 
-
 def _set_session_cookie(response: Response, token: str, settings: Settings) -> None:
     response.set_cookie(
         key=settings.native_session_cookie_name,
@@ -60,7 +57,6 @@ def _set_session_cookie(response: Response, token: str, settings: Settings) -> N
         samesite=settings.native_session_cookie_samesite,
     )
 
-
 def _clear_session_cookie(response: Response, settings: Settings) -> None:
     for name in {settings.native_session_cookie_name, "__Host-patroai_session", "patroai_session"}:
         response.delete_cookie(
@@ -71,13 +67,11 @@ def _clear_session_cookie(response: Response, settings: Settings) -> None:
             samesite=settings.native_session_cookie_samesite,
         )
 
-
 def _client_ip(request: Request) -> str:
     forwarded = request.headers.get("x-forwarded-for", "")
     if forwarded:
         return forwarded.split(",", 1)[0].strip()
     return request.client.host if request.client else ""
-
 
 def _password_reset_url(token: str, settings: Settings) -> str:
     base_url = settings.native_password_reset_base_url.strip().rstrip("/")
@@ -85,7 +79,6 @@ def _password_reset_url(token: str, settings: Settings) -> str:
     if not base_url:
         return token
     return f"{base_url}/access?mode=reset&token={token_q}"
-
 
 def _send_password_reset_email(to_email: str, token: str, settings: Settings) -> None:
     reset_url = _password_reset_url(token, settings)
@@ -123,7 +116,6 @@ def _send_password_reset_email(to_email: str, token: str, settings: Settings) ->
         idempotency_key=f"native-password-reset:{token[:18]}",
     )
 
-
 @router.post("/bootstrap-owner", response_model=NativeSessionOut)
 def bootstrap_native_owner(
     payload: NativeBootstrapOwnerRequest,
@@ -140,7 +132,6 @@ def bootstrap_native_owner(
         raise HTTPException(403, "NATIVE_BOOTSTRAP_FORBIDDEN")
     if len(payload.password) < settings.native_password_min_length:
         raise HTTPException(422, "PASSWORD_TOO_SHORT")
-
     try:
         principal = bootstrap_owner(
             db,
@@ -162,11 +153,9 @@ def bootstrap_native_owner(
     except NativeAuthError as exc:
         db.rollback()
         raise HTTPException(409, exc.code) from exc
-
     db.commit()
     _set_session_cookie(response, result.token, settings)
     return _session_out(principal)
-
 
 @router.post("/login", response_model=NativeSessionOut)
 def native_login(
@@ -195,7 +184,6 @@ def native_login(
     _set_session_cookie(response, result.token, settings)
     return _session_out(result.principal)
 
-
 @router.post("/register", response_model=NativeSessionOut)
 def native_register(
     payload: NativeRegisterWithGrantRequest,
@@ -211,7 +199,6 @@ def native_register(
     tenant_id = settings.access_gate_tenant_id.strip()
     if not tenant_id:
         raise HTTPException(503, "ACCESS_GATE_NOT_CONFIGURED")
-
     email = str(payload.email).strip().lower()
     existing_user = db.scalar(select(User).where(User.email == email))
     if existing_user is not None:
@@ -220,12 +207,14 @@ def native_register(
         )
         if credential is not None:
             raise HTTPException(409, "NATIVE_ACCOUNT_ALREADY_EXISTS")
-        user_id = existing_user.id
-        subject = existing_user.external_subject
+        # SECURITY P0 — a normal onboarding grant proves permission to enter
+        # the product, not ownership of a pre-existing identity. Never attach
+        # a NativeCredential to an existing User without a dedicated,
+        # strongly verified account-claim flow.
+        raise HTTPException(409, "ACCOUNT_CLAIM_REQUIRED")
     else:
         user_id = str(uuid.uuid4())
         subject = f"native:{email}"
-
     principal = Principal(
         user_id=user_id,
         tenant_id=tenant_id,
@@ -267,7 +256,6 @@ def native_register(
     _set_session_cookie(response, result.token, settings)
     return _session_out(result.principal)
 
-
 @router.post("/password/forgot", response_model=NativeForgotPasswordOut)
 def native_forgot_password(
     payload: NativeForgotPasswordRequest,
@@ -295,7 +283,6 @@ def native_forgot_password(
         else None,
     )
 
-
 @router.post("/password/reset", response_model=NativeSessionOut)
 def native_reset_password(
     payload: NativeResetPasswordRequest,
@@ -318,7 +305,6 @@ def native_reset_password(
     _clear_session_cookie(response, settings)
     return NativeSessionOut(authenticated=False)
 
-
 @router.post("/logout", response_model=NativeSessionOut)
 def native_logout(
     response: Response,
@@ -333,7 +319,6 @@ def native_logout(
     db.commit()
     _clear_session_cookie(response, settings)
     return NativeSessionOut(authenticated=False)
-
 
 @router.get("/session", response_model=NativeSessionOut)
 def native_session(
