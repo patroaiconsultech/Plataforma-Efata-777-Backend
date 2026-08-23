@@ -1,7 +1,7 @@
 {
   "authentication_release_policy": "OIDC/ZITADEL only; first-party authentication excluded",
-  "base_sha": "d2ffe9a589cd6374beaffe0455fb084138ed6dd3",
-  "candidate_head": "d2ffe9a589cd6374beaffe0455fb084138ed6dd3",
+  "base_sha": "09cc8d894527aa947055c82623f773e6d99bdfcf",
+  "candidate_head": "09cc8d894527aa947055c82623f773e6d99bdfcf-manual-upload-fix",
   "file_count": 31,
   "files": [
     {
@@ -50,9 +50,9 @@
       "sha256": "43bb60cdb0dfebceadc932445aa1c0dcb6ba20c325605e74c3b554b2c7953713"
     },
     {
-      "bytes": 2822,
+      "bytes": 2744,
       "path": "src/orkio_v2/agents/catalog.py",
-      "sha256": "0501ac052def8df83453830e666c77bcfded210a6dc2a097d0ae55223d26410e"
+      "sha256": "a479e0dccce9b95cd356283e82c907cfe37521338160eedfdd199fef31751c46"
     },
     {
       "bytes": 18849,
@@ -65,9 +65,9 @@
       "sha256": "d12dc06cde2aef59f2eaef5735557d3198eb92e879ecb7b067cd95c6d5222216"
     },
     {
-      "bytes": 45877,
+      "bytes": 47921,
       "path": "src/orkio_v2/routes.py",
-      "sha256": "28b3b4dcd15315dedfd8c802f146ad42b99ec304bcffa9229bc2748504afd3fe"
+      "sha256": "f71219c573da845fa120ee52288e8c283c2b6c6c7b44a09cdb8bf37614eb5741"
     },
     {
       "bytes": 21632,
