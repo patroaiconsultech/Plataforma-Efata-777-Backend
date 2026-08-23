@@ -20,9 +20,45 @@ class Settings(BaseSettings):
     database_url: str = Field("sqlite+pysqlite:///./orkio_v2.db", alias="DATABASE_URL")
     allowed_origins: str = Field("http://localhost:5173", alias="PLATFORM_ALLOWED_ORIGINS")
 
-    auth_mode: Literal["test","external_required","oidc_introspection"] = Field("external_required", alias="PLATFORM_AUTH_MODE")
+    auth_mode: Literal[
+        "test",
+        "external_required",
+        "oidc_introspection",
+        "native_session",
+        "native_or_oidc",
+    ] = Field("external_required", alias="PLATFORM_AUTH_MODE")
     demo_headers_enabled: bool = Field(False, alias="PLATFORM_DEMO_IDENTITY_HEADERS_ENABLED")
     platform_owner_subject: str | None = Field(None, alias="PLATFORM_OWNER_SUBJECT")
+    native_auth_pepper: str = Field("", alias="PLATFORM_NATIVE_AUTH_PEPPER")
+    native_session_secret: str = Field("", alias="PLATFORM_NATIVE_SESSION_SECRET")
+    native_bootstrap_secret: str = Field("", alias="PLATFORM_NATIVE_BOOTSTRAP_SECRET")
+    native_session_cookie_name: str = Field(
+        "__Host-patroai_session", alias="PLATFORM_NATIVE_SESSION_COOKIE_NAME"
+    )
+    native_session_cookie_secure: bool = Field(
+        False, alias="PLATFORM_NATIVE_SESSION_COOKIE_SECURE"
+    )
+    native_session_cookie_samesite: Literal["strict", "lax", "none"] = Field(
+        "lax", alias="PLATFORM_NATIVE_SESSION_COOKIE_SAMESITE"
+    )
+    native_session_ttl_hours: int = Field(12, alias="PLATFORM_NATIVE_SESSION_TTL_HOURS")
+    native_password_min_length: int = Field(12, alias="PLATFORM_NATIVE_PASSWORD_MIN_LENGTH")
+    native_password_reset_ttl_minutes: int = Field(
+        30, alias="PLATFORM_NATIVE_PASSWORD_RESET_TTL_MINUTES"
+    )
+    native_password_reset_base_url: str = Field(
+        "", alias="PLATFORM_NATIVE_PASSWORD_RESET_BASE_URL"
+    )
+    resend_api_key: str = Field(
+        "", validation_alias=AliasChoices("RESEND_API_KEY", "PLATFORM_RESEND_API_KEY")
+    )
+    resend_from: str = Field(
+        "PatroAI <no-reply@patroai.com>",
+        validation_alias=AliasChoices("RESEND_FROM", "PLATFORM_RESEND_FROM"),
+    )
+    resend_user_agent: str = Field("patroai-orkio/1.0", alias="PLATFORM_RESEND_USER_AGENT")
+    native_login_max_failures: int = Field(8, alias="PLATFORM_NATIVE_LOGIN_MAX_FAILURES")
+    native_login_lock_minutes: int = Field(15, alias="PLATFORM_NATIVE_LOGIN_LOCK_MINUTES")
     oidc_issuer: str | None = Field(None, alias="PLATFORM_OIDC_ISSUER")
     oidc_audience: str | None = Field(None, alias="PLATFORM_OIDC_AUDIENCE")
     oidc_introspection_endpoint: str | None = Field(None, alias="PLATFORM_OIDC_INTROSPECTION_ENDPOINT")
@@ -191,6 +227,58 @@ class Settings(BaseSettings):
             ]
             if not all(required):
                 raise ValueError("OIDC_CONFIGURATION_INCOMPLETE")
+        if self.auth_mode == "native_or_oidc":
+            required = [
+                self.oidc_issuer,
+                self.oidc_audience,
+                self.oidc_introspection_endpoint,
+                self.oidc_introspection_client_id,
+                self.oidc_introspection_client_secret,
+            ]
+            if not all(required):
+                raise ValueError("OIDC_CONFIGURATION_INCOMPLETE")
+        if self.auth_mode in {"native_session", "native_or_oidc"}:
+            if len(self.native_auth_pepper) < 32:
+                raise ValueError("NATIVE_AUTH_PEPPER_TOO_SHORT")
+            if len(self.native_session_secret) < 32:
+                raise ValueError("NATIVE_SESSION_SECRET_TOO_SHORT")
+            if (
+                self.environment in {"staging", "production"}
+                and len(self.native_bootstrap_secret) < 32
+            ):
+                raise ValueError("NATIVE_BOOTSTRAP_SECRET_TOO_SHORT")
+            if not self.native_session_cookie_name.strip():
+                raise ValueError("NATIVE_SESSION_COOKIE_NAME_REQUIRED")
+            if (
+                self.native_session_cookie_name.startswith("__Host-")
+                and not self.native_session_cookie_secure
+                and self.environment in {"staging", "production"}
+            ):
+                raise ValueError("NATIVE_HOST_COOKIE_REQUIRES_SECURE")
+            if self.native_session_cookie_samesite == "none" and not self.native_session_cookie_secure:
+                raise ValueError("NATIVE_SAMESITE_NONE_REQUIRES_SECURE")
+            if self.environment in {"staging", "production"} and not self.native_session_cookie_secure:
+                raise ValueError("NATIVE_SESSION_COOKIE_SECURE_REQUIRED")
+            if self.native_session_ttl_hours < 1 or self.native_session_ttl_hours > 168:
+                raise ValueError("NATIVE_SESSION_TTL_INVALID")
+            if self.native_password_min_length < 12:
+                raise ValueError("NATIVE_PASSWORD_MIN_LENGTH_TOO_LOW")
+            if self.native_password_reset_ttl_minutes < 5 or self.native_password_reset_ttl_minutes > 120:
+                raise ValueError("NATIVE_PASSWORD_RESET_TTL_INVALID")
+            if self.native_password_reset_base_url and not self.native_password_reset_base_url.startswith("https://"):
+                if self.environment in {"staging", "production"}:
+                    raise ValueError("NATIVE_PASSWORD_RESET_BASE_URL_REQUIRES_HTTPS")
+            if self.environment in {"staging", "production"}:
+                if not self.native_password_reset_base_url.strip():
+                    raise ValueError("NATIVE_PASSWORD_RESET_BASE_URL_REQUIRED")
+                if not self.resend_api_key.strip():
+                    raise ValueError("RESEND_API_KEY_REQUIRED_FOR_NATIVE_PASSWORD_RESET")
+                if "@" not in self.resend_from:
+                    raise ValueError("RESEND_FROM_INVALID")
+            if self.native_login_max_failures < 3 or self.native_login_max_failures > 20:
+                raise ValueError("NATIVE_LOGIN_MAX_FAILURES_INVALID")
+            if self.native_login_lock_minutes < 1 or self.native_login_lock_minutes > 1440:
+                raise ValueError("NATIVE_LOGIN_LOCK_MINUTES_INVALID")
         if (
             self.document_ingestion_max_archive_entries < 1
             or self.document_ingestion_max_total_uncompressed_bytes < 1

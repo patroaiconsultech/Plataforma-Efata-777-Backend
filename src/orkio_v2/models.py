@@ -37,6 +37,49 @@ class Membership(Base):
     role: Mapped[str] = mapped_column(String(40), default="member")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+class NativeCredential(Base):
+    __tablename__ = "native_credentials"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    password_hash: Mapped[str] = mapped_column(String(512))
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    password_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+class NativeSession(Base):
+    __tablename__ = "native_sessions"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    session_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_prefix: Mapped[str] = mapped_column(String(16), index=True)
+    tenant_id: Mapped[str] = mapped_column(
+        ForeignKey("tenants.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    user_agent: Mapped[str] = mapped_column(String(240), default="")
+    ip_prefix: Mapped[str] = mapped_column(String(80), default="")
+
+class NativePasswordReset(Base):
+    __tablename__ = "native_password_resets"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_prefix: Mapped[str] = mapped_column(String(16), index=True)
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
 class Thread(Base):
     __tablename__="threads"
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)

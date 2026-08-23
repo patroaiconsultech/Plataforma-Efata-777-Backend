@@ -64,3 +64,49 @@ class HyperCocreatorOnboardingComplete(BaseModel):
 
 class HyperCocreatorProfileUpdate(BaseModel):
     co_creator_name: str = Field(min_length=2, max_length=64)
+
+
+class NativeBootstrapOwnerRequest(BaseModel):
+    bootstrap_secret: str = Field(min_length=32, max_length=512)
+    tenant_id: str = Field("patroai", min_length=3, max_length=64)
+    tenant_name: str = Field("Grupo PatroAI", min_length=2, max_length=200)
+    email: EmailStr
+    display_name: str = Field(min_length=2, max_length=200)
+    password: str = Field(min_length=12, max_length=256)
+
+
+class NativeLoginRequest(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=256)
+
+
+class NativeRegisterWithGrantRequest(BaseModel):
+    grant: str = Field(min_length=32, max_length=4096)
+    email: EmailStr
+    display_name: str = Field(min_length=2, max_length=200)
+    password: str = Field(min_length=12, max_length=256)
+    co_creator_name: str = Field(min_length=2, max_length=64)
+    onboarding_goal: str | None = Field(default=None, max_length=240)
+
+
+class NativeForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class NativeForgotPasswordOut(BaseModel):
+    status: str
+    reset_token: str | None = None
+
+
+class NativeResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=512)
+    password: str = Field(min_length=12, max_length=256)
+    password_confirm: str = Field(min_length=12, max_length=256)
+
+
+class NativeSessionOut(BaseModel):
+    authenticated: bool
+    user_id: str | None = None
+    tenant_id: str | None = None
+    email: EmailStr | None = None
+    roles: list[str] = Field(default_factory=list)

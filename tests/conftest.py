@@ -29,7 +29,7 @@ with engine.begin() as connection:
     connection.exec_driver_sql("DELETE FROM alembic_version")
     connection.exec_driver_sql(
         "INSERT INTO alembic_version(version_num) "
-        "VALUES ('002_hyper_cocreator')"
+        "VALUES ('003_native_auth')"
     )
 
 def override_db():

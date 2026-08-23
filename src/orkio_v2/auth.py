@@ -1,8 +1,11 @@
 from dataclasses import dataclass
-from fastapi import Depends, Header, HTTPException
+from fastapi import Cookie, Depends, Header, HTTPException
 import httpx
+from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
+from .database import get_db
+from .services.native_auth import principal_from_session
 from .services.oidc_identity import OIDCIdentityMappingError, normalize_oidc_identity
 
 
@@ -17,12 +20,15 @@ class Principal:
 
 def require_principal(
     authorization: str | None = Header(None),
+    native_session: str | None = Cookie(None, alias="__Host-patroai_session"),
+    legacy_native_session: str | None = Cookie(None, alias="patroai_session"),
     x_test_user: str | None = Header(None, alias="X-Test-User"),
     x_test_tenant: str | None = Header(None, alias="X-Test-Tenant"),
     x_test_roles: str | None = Header(None, alias="X-Test-Roles"),
     x_test_email: str | None = Header(None, alias="X-Test-Email"),
     x_test_subject: str | None = Header(None, alias="X-Test-Subject"),
     settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
 ) -> Principal:
     if settings.auth_mode == "test":
         if settings.environment not in {"test", "development"}:
@@ -41,6 +47,14 @@ def require_principal(
 
     if settings.auth_mode == "external_required":
         raise HTTPException(status_code=401, detail="AUTH_PROVIDER_REQUIRED")
+
+    if settings.auth_mode in {"native_session", "native_or_oidc"}:
+        token = native_session or legacy_native_session
+        principal = principal_from_session(db, token=token, settings=settings)
+        if principal is not None:
+            return principal
+        if settings.auth_mode == "native_session":
+            raise HTTPException(status_code=401, detail="NATIVE_SESSION_REQUIRED")
 
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="BEARER_TOKEN_REQUIRED")

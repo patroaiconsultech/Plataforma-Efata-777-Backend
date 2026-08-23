@@ -333,7 +333,7 @@ def _history(
 def health(settings: Settings=Depends(get_settings)):
     return {"status":"ok","release":"2.0.0a1","sha":settings.release_sha,"environment":settings.environment}
 
-EXPECTED_MIGRATION_HEAD = "002_hyper_cocreator"
+EXPECTED_MIGRATION_HEAD = "003_native_auth"
 
 
 @router.get("/ready")
