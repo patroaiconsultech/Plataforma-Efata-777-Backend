@@ -1,2 +1,0 @@
-src/auth/oidc.ts
-src/routes/AuthCallback.tsx
