@@ -17,7 +17,7 @@ from orkio_v2.models import (
     User,
     UserExperienceProfile,
 )
-from tests.conftest import Testing
+from conftest import Testing
 
 
 @pytest.fixture(autouse=True)
