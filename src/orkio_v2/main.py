@@ -10,9 +10,19 @@ from .team_routes import router as team_router
 from .realtime_routes import router as realtime_router
 from .voice_routes import router as voice_router
 from .tts_routes import router as tts_router
+from .public_applications import router as public_applications_router
 settings=get_settings()
+_PRODUCTION_FRONTEND_ORIGIN = "https://plataforma-efata-777-frontend-production.up.railway.app"
+_cors_origins = [
+    origin.strip()
+    for origin in settings.allowed_origins.split(",")
+    if origin.strip()
+]
+if _PRODUCTION_FRONTEND_ORIGIN not in _cors_origins:
+    _cors_origins.append(_PRODUCTION_FRONTEND_ORIGIN)
+
 app=FastAPI(title="ORKIO v2 Premium",docs_url="/docs" if settings.environment!="production" else None)
-app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in settings.allowed_origins.split(",") if x.strip()],
+app.add_middleware(CORSMiddleware,allow_origins=_cors_origins,
                    allow_credentials=True,allow_methods=["GET","POST","PATCH","DELETE","OPTIONS"],allow_headers=["Authorization","Content-Type","X-Request-ID"])
 app.include_router(auth_router)
 app.include_router(router)
@@ -20,6 +30,7 @@ app.include_router(team_router)
 app.include_router(realtime_router)
 app.include_router(voice_router)
 app.include_router(tts_router)
+app.include_router(public_applications_router)
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 @app.middleware("http")
