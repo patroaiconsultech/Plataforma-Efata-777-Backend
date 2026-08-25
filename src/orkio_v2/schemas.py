@@ -1,4 +1,5 @@
 from datetime import datetime
+
 from pydantic import BaseModel, EmailStr, Field
 from typing import Literal
 
@@ -78,6 +79,8 @@ class NativeBootstrapOwnerRequest(BaseModel):
 class NativeLoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=256)
+    tenant_id: str | None = Field(default=None, max_length=64)
+    return_path: str | None = Field(default=None, max_length=512)
 
 
 class NativeRegisterWithGrantRequest(BaseModel):
@@ -106,7 +109,65 @@ class NativeResetPasswordRequest(BaseModel):
 
 class NativeSessionOut(BaseModel):
     authenticated: bool
+    status: str | None = None
     user_id: str | None = None
     tenant_id: str | None = None
     email: EmailStr | None = None
     roles: list[str] = Field(default_factory=list)
+    challenge_token: str | None = None
+    claim_token: str | None = None
+    verification_token: str | None = None
+    recovery_codes: list[str] = Field(default_factory=list)
+
+
+class NativeRegistrationOut(BaseModel):
+    status: str
+    verification_token: str | None = None
+    claim_token: str | None = None
+
+
+class NativeMfaEnrollStartRequest(BaseModel):
+    challenge_token: str = Field(min_length=32, max_length=512)
+
+
+class NativeMfaEnrollStartOut(BaseModel):
+    secret: str
+    otpauth_uri: str
+
+
+class NativeMfaEnrollConfirmRequest(BaseModel):
+    challenge_token: str = Field(min_length=32, max_length=512)
+    code: str = Field(min_length=6, max_length=8)
+
+
+class NativeMfaVerifyRequest(BaseModel):
+    challenge_token: str = Field(min_length=32, max_length=512)
+    code: str | None = Field(default=None, min_length=6, max_length=8)
+    recovery_code: str | None = Field(default=None, min_length=6, max_length=32)
+
+
+class NativeReauthenticateRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+    code: str | None = Field(default=None, min_length=6, max_length=8)
+    recovery_code: str | None = Field(default=None, min_length=6, max_length=32)
+
+
+class NativeAccountActionRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=512)
+
+
+class NativeAccountRecoveryRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=512)
+    password: str = Field(min_length=12, max_length=256)
+    password_confirm: str = Field(min_length=12, max_length=256)
+
+
+class NativeSessionRecordOut(BaseModel):
+    id: str
+    current: bool
+    created_at: datetime
+    last_seen_at: datetime
+    expires_at: datetime
+    user_agent: str
+    ip_prefix: str
+    mfa_verified: bool = False

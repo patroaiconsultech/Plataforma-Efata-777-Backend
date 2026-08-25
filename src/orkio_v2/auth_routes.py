@@ -13,6 +13,14 @@ from .database import get_db
 from .schemas import (
     NativeForgotPasswordOut,
     NativeForgotPasswordRequest,
+    NativeAccountActionRequest,
+    NativeAccountRecoveryRequest,
+    NativeMfaEnrollConfirmRequest,
+    NativeMfaEnrollStartOut,
+    NativeMfaEnrollStartRequest,
+    NativeMfaVerifyRequest,
+    NativeReauthenticateRequest,
+    NativeSessionRecordOut,
     NativeBootstrapOwnerRequest,
     NativeLoginRequest,
     NativeRegisterWithGrantRequest,
@@ -21,29 +29,58 @@ from .schemas import (
 )
 from .services.native_auth import (
     NativeAuthError,
+    NativeLoginChallenge,
     bootstrap_owner,
     create_or_update_credential,
+    create_account_recovery_challenge,
+    complete_account_recovery,
+    create_email_verification_challenge,
+    complete_email_verification,
     create_password_reset,
     login,
+    mfa_enrollment_confirm,
+    mfa_enrollment_start,
+    mfa_verify,
+    issue_session,
     reset_password,
+    session_digest,
+    verify_password,
     revoke_password_reset,
     revoke_session,
 )
 from .services.email_delivery import EmailDeliveryError, send_resend_email
-from .models import NativeCredential, User
+from .models import (
+    Membership,
+    NativeAuthChallenge,
+    NativeCredential,
+    NativeMfaFactor,
+    NativeSession,
+    NativeMfaRecoveryCode,
+    User,
+    now,
+)
 from .services.hyper_cocreator import AccessGateError, complete_onboarding
 router = APIRouter(prefix="/api/v2/auth", tags=["native-auth"])
 
 
-def _session_out(principal: Principal | None) -> NativeSessionOut:
+def _session_out(
+    principal: Principal | None,
+    *,
+    status: str | None = None,
+    challenge_token: str | None = None,
+    recovery_codes: list[str] | None = None,
+) -> NativeSessionOut:
     if principal is None:
-        return NativeSessionOut(authenticated=False)
+        return NativeSessionOut(authenticated=False, status=status, challenge_token=challenge_token)
     return NativeSessionOut(
         authenticated=True,
+        status=status or "AUTHENTICATED",
         user_id=principal.user_id,
         tenant_id=principal.tenant_id,
         email=principal.email,
         roles=list(principal.roles),
+        challenge_token=challenge_token,
+        recovery_codes=recovery_codes or [],
     )
 
 def _set_session_cookie(response: Response, token: str, settings: Settings) -> None:
@@ -79,6 +116,29 @@ def _password_reset_url(token: str, settings: Settings) -> str:
     if not base_url:
         return token
     return f"{base_url}/access?mode=reset&token={token_q}"
+
+def _account_recovery_url(token: str, settings: Settings) -> str:
+    base_url = settings.native_password_reset_base_url.strip().rstrip("/")
+    token_q = quote(token.strip(), safe="")
+    if not base_url:
+        return token
+    return f"{base_url}/access?mode=activate&token={token_q}"
+
+
+def _send_account_recovery_email(to_email: str, token: str, settings: Settings) -> None:
+    url = _account_recovery_url(token, settings)
+    send_resend_email(
+        settings=settings,
+        to_email=to_email,
+        subject="PatroAI | Ativação segura de acesso",
+        text_body=(
+            "Foi solicitada a ativação de uma credencial PatroAI para sua conta.\n\n"
+            f"Conclua em até 30 minutos: {url}\n\n"
+            "Se você não solicitou esta ação, ignore este e-mail."
+        ),
+        idempotency_key=f"native-account-recovery:{token[:18]}",
+    )
+
 
 def _send_password_reset_email(to_email: str, token: str, settings: Settings) -> None:
     reset_url = _password_reset_url(token, settings)
@@ -142,13 +202,13 @@ def bootstrap_native_owner(
             password=payload.password,
             settings=settings,
         )
-        result = login(
+        result = issue_session(
             db,
-            email=str(payload.email),
-            password=payload.password,
+            principal=principal,
             settings=settings,
             user_agent=request.headers.get("user-agent", ""),
             client_ip=_client_ip(request),
+            mfa_verified=False,
         )
     except NativeAuthError as exc:
         db.rollback()
@@ -181,6 +241,12 @@ def native_login(
         status = 423 if exc.code == "ACCOUNT_TEMPORARILY_LOCKED" else 401
         raise HTTPException(status, exc.code) from exc
     db.commit()
+    if isinstance(result, NativeLoginChallenge):
+        return _session_out(
+            result.principal,
+            status=result.status,
+            challenge_token=result.token,
+        )
     _set_session_cookie(response, result.token, settings)
     return _session_out(result.principal)
 
@@ -207,11 +273,33 @@ def native_register(
         )
         if credential is not None:
             raise HTTPException(409, "NATIVE_ACCOUNT_ALREADY_EXISTS")
-        # SECURITY P0 — a normal onboarding grant proves permission to enter
-        # the product, not ownership of a pre-existing identity. Never attach
-        # a NativeCredential to an existing User without a dedicated,
-        # strongly verified account-claim flow.
-        raise HTTPException(409, "ACCOUNT_CLAIM_REQUIRED")
+        try:
+            claim_token = create_account_recovery_challenge(
+                db,
+                email=email,
+                grant_token=payload.grant,
+                settings=settings,
+            )
+        except NativeAuthError as exc:
+            db.rollback()
+            status = 409 if exc.code in {"ACCOUNT_RECOVERY_NOT_ALLOWED", "NATIVE_ACCOUNT_ALREADY_EXISTS"} else 403
+            raise HTTPException(status, exc.code) from exc
+        if not claim_token:
+            db.rollback()
+            return NativeSessionOut(authenticated=False, status="accepted")
+        db.commit()
+        if settings.resend_api_key.strip():
+            try:
+                _send_account_recovery_email(email, claim_token, settings)
+            except EmailDeliveryError:
+                db.rollback()
+        exposed_token = claim_token if settings.environment in {"development", "test"} and not settings.resend_api_key.strip() else None
+        return NativeSessionOut(
+            authenticated=False,
+            status="ACCOUNT_RECOVERY_REQUIRED",
+            claim_token=exposed_token,
+            verification_token=exposed_token,
+        )
     else:
         user_id = str(uuid.uuid4())
         subject = f"native:{email}"
@@ -325,3 +413,247 @@ def native_session(
     principal: Principal = Depends(require_principal),
 ):
     return _session_out(principal)
+
+
+@router.get("/bootstrap-status")
+def native_bootstrap_status(settings: Settings = Depends(get_settings), db: Session = Depends(get_db)):
+    completed = db.scalar(select(NativeCredential.id).limit(1)) is not None
+    return {"enabled": bool(settings.native_bootstrap_secret), "completed": completed}
+
+
+@router.post("/email/verify")
+def native_verify_email(
+    payload: NativeAccountActionRequest,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    try:
+        complete_email_verification(db, token=payload.token, settings=settings)
+    except NativeAuthError as exc:
+        db.rollback()
+        raise HTTPException(400, exc.code) from exc
+    db.commit()
+    return {"status": "EMAIL_VERIFIED"}
+
+
+@router.post("/email/verification/resend")
+def native_resend_verification(
+    payload: NativeForgotPasswordRequest,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    issue = create_email_verification_challenge(db, email=str(payload.email), settings=settings)
+    db.commit()
+    if issue is not None and settings.resend_api_key.strip():
+        token, email = issue
+        try:
+            send_resend_email(
+                settings=settings,
+                to_email=email,
+                subject="PatroAI | Confirmação de e-mail",
+                text_body=f"Confirme seu e-mail em {settings.native_password_reset_base_url.rstrip('/')}/access?mode=verify&token={quote(token, safe='')}",
+                idempotency_key=f"native-email-verification:{token[:18]}",
+            )
+        except EmailDeliveryError:
+            pass
+    return {"status": "accepted"}
+
+
+@router.post("/account/claim")
+def native_claim_account(
+    payload: NativeAccountActionRequest,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    try:
+        complete_email_verification(db, token=payload.token, settings=settings)
+    except NativeAuthError as exc:
+        db.rollback()
+        raise HTTPException(400, exc.code) from exc
+    db.commit()
+    return {"status": "ACCOUNT_CLAIM_VERIFIED"}
+
+
+@router.post("/account/recover", response_model=NativeSessionOut)
+def native_recover_account(
+    payload: NativeAccountRecoveryRequest,
+    response: Response,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    if settings.auth_mode not in {"native_session", "native_or_oidc"}:
+        raise HTTPException(404, "NATIVE_AUTH_DISABLED")
+    if payload.password != payload.password_confirm:
+        raise HTTPException(422, "PASSWORD_CONFIRMATION_MISMATCH")
+    if len(payload.password) < settings.native_password_min_length:
+        raise HTTPException(422, "PASSWORD_TOO_SHORT")
+    try:
+        complete_account_recovery(db, token=payload.token, password=payload.password, settings=settings)
+    except NativeAuthError as exc:
+        db.rollback()
+        raise HTTPException(400, exc.code) from exc
+    db.commit()
+    _clear_session_cookie(response, settings)
+    return NativeSessionOut(authenticated=False, status="ACCOUNT_RECOVERY_COMPLETE")
+
+
+@router.post("/mfa/enroll/start", response_model=NativeMfaEnrollStartOut)
+def native_mfa_enroll_start(
+    payload: NativeMfaEnrollStartRequest,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    try:
+        secret, uri = mfa_enrollment_start(db, token=payload.challenge_token, settings=settings)
+    except NativeAuthError as exc:
+        db.rollback()
+        raise HTTPException(400, exc.code) from exc
+    db.commit()
+    return NativeMfaEnrollStartOut(secret=secret, otpauth_uri=uri)
+
+
+@router.post("/mfa/enroll/confirm", response_model=NativeSessionOut)
+def native_mfa_enroll_confirm(
+    payload: NativeMfaEnrollConfirmRequest,
+    response: Response,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    try:
+        result, recovery_codes = mfa_enrollment_confirm(
+            db,
+            token=payload.challenge_token,
+            code=payload.code,
+            settings=settings,
+            user_agent=request.headers.get("user-agent", ""),
+            client_ip=_client_ip(request),
+        )
+    except NativeAuthError as exc:
+        db.rollback()
+        raise HTTPException(400, exc.code) from exc
+    db.commit()
+    _set_session_cookie(response, result.token, settings)
+    return _session_out(result.principal, status="AUTHENTICATED", recovery_codes=recovery_codes)
+
+
+@router.post("/mfa/verify", response_model=NativeSessionOut)
+def native_mfa_verify(
+    payload: NativeMfaVerifyRequest,
+    response: Response,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    if bool(payload.code) == bool(payload.recovery_code):
+        raise HTTPException(422, "MFA_EXACTLY_ONE_FACTOR_REQUIRED")
+    try:
+        result = mfa_verify(
+            db,
+            token=payload.challenge_token,
+            code=payload.code,
+            recovery_code=payload.recovery_code,
+            settings=settings,
+            user_agent=request.headers.get("user-agent", ""),
+            client_ip=_client_ip(request),
+        )
+    except NativeAuthError as exc:
+        db.rollback()
+        raise HTTPException(400, exc.code) from exc
+    db.commit()
+    _set_session_cookie(response, result.token, settings)
+    return _session_out(result.principal, status="AUTHENTICATED")
+
+
+def _current_session(request: Request, settings: Settings, db: Session, principal: Principal) -> NativeSession | None:
+    token = request.cookies.get(settings.native_session_cookie_name) or request.cookies.get("__Host-patroai_session") or request.cookies.get("patroai_session")
+    if not token:
+        return None
+    return db.scalar(select(NativeSession).where(
+        NativeSession.session_hash == session_digest(token, settings),
+        NativeSession.user_id == principal.user_id,
+        NativeSession.tenant_id == principal.tenant_id,
+    ))
+
+
+@router.post("/reauthenticate", response_model=NativeSessionOut)
+def native_reauthenticate(
+    payload: NativeReauthenticateRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+):
+    credential = db.scalar(select(NativeCredential).where(NativeCredential.user_id == principal.user_id))
+    if credential is None or not verify_password(payload.password, credential.password_hash, settings):
+        raise HTTPException(401, "INVALID_CREDENTIALS")
+    session = _current_session(request, settings, db, principal)
+    if session is None:
+        raise HTTPException(401, "NATIVE_SESSION_REQUIRED")
+    session.reauthenticated_at = now()
+    db.commit()
+    return _session_out(principal, status="REAUTHENTICATED")
+
+
+@router.get("/sessions", response_model=dict[str, list[NativeSessionRecordOut]])
+def native_sessions(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+):
+    current = _current_session(request, settings, db, principal)
+    rows = db.scalars(select(NativeSession).where(
+        NativeSession.user_id == principal.user_id,
+        NativeSession.tenant_id == principal.tenant_id,
+    ).order_by(NativeSession.created_at.desc())).all()
+    return {"sessions": [NativeSessionRecordOut(
+        id=row.id,
+        current=current is not None and row.id == current.id,
+        created_at=row.created_at,
+        last_seen_at=row.last_seen_at,
+        expires_at=row.expires_at,
+        user_agent=row.user_agent,
+        ip_prefix=row.ip_prefix,
+        mfa_verified=row.mfa_verified_at is not None,
+    ) for row in rows if row.revoked_at is None]}
+
+
+@router.post("/sessions/revoke-all", response_model=NativeSessionOut)
+def native_revoke_other_sessions(
+    request: Request,
+    response: Response,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+):
+    current = _current_session(request, settings, db, principal)
+    query = select(NativeSession).where(
+        NativeSession.user_id == principal.user_id,
+        NativeSession.tenant_id == principal.tenant_id,
+        NativeSession.revoked_at.is_(None),
+    )
+    for row in db.scalars(query).all():
+        if current is None or row.id != current.id:
+            row.revoked_at = now()
+    db.commit()
+    return _session_out(principal, status="OTHER_SESSIONS_REVOKED")
+
+
+@router.delete("/sessions/{session_id}", response_model=NativeSessionOut)
+def native_revoke_one_session(
+    session_id: str,
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_principal),
+):
+    row = db.scalar(select(NativeSession).where(
+        NativeSession.id == session_id,
+        NativeSession.user_id == principal.user_id,
+        NativeSession.tenant_id == principal.tenant_id,
+    ))
+    if row is None:
+        raise HTTPException(404, "SESSION_NOT_FOUND")
+    row.revoked_at = now()
+    db.commit()
+    return _session_out(principal, status="SESSION_REVOKED")

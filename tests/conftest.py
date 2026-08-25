@@ -8,7 +8,8 @@ os.environ.pop("GEMINI_API_KEY", None)
 os.environ.pop("GOOGLE_API_KEY", None)
 os.environ.update({
  "PLATFORM_ENVIRONMENT":"test","PLATFORM_AUTH_MODE":"test",
- "PLATFORM_INVITATION_TOKEN_SECRET":"x"*40,"DATABASE_URL":"sqlite+pysqlite:///:memory:"
+  "PLATFORM_INVITATION_TOKEN_SECRET":"x"*40,"DATABASE_URL":"sqlite+pysqlite:///:memory:","PLATFORM_ALLOWED_ORIGINS":"http://localhost:5173,https://plataforma-efata-777-frontend-production.up.railway.app"
+
 })
 import pytest
 from fastapi.testclient import TestClient
@@ -29,7 +30,7 @@ with engine.begin() as connection:
     connection.exec_driver_sql("DELETE FROM alembic_version")
     connection.exec_driver_sql(
         "INSERT INTO alembic_version(version_num) "
-        "VALUES ('003_native_auth')"
+        "VALUES ('004_rc1_auth_d')"
     )
 
 def override_db():

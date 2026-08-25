@@ -27,6 +27,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), index=True)
     display_name: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 class Membership(Base):
     __tablename__="memberships"
@@ -67,6 +68,12 @@ class NativeSession(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     user_agent: Mapped[str] = mapped_column(String(240), default="")
     ip_prefix: Mapped[str] = mapped_column(String(80), default="")
+    previous_session_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    rotation_grace_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    authenticated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    mfa_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reauthenticated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 class NativePasswordReset(Base):
     __tablename__ = "native_password_resets"
@@ -230,3 +237,50 @@ class AccessGrantRedemption(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     redeemed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class NativeAuthThrottle(Base):
+    __tablename__ = "native_auth_throttles"
+    __table_args__ = (UniqueConstraint("scope", "key_hash", name="uq_native_auth_throttle_scope_key"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    scope: Mapped[str] = mapped_column(String(40))
+    key_hash: Mapped[str] = mapped_column(String(64))
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class NativeAuthChallenge(Base):
+    __tablename__ = "native_auth_challenges"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    token_prefix: Mapped[str] = mapped_column(String(16), index=True)
+    purpose: Mapped[str] = mapped_column(String(40), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    tenant_id: Mapped[str | None] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"), nullable=True, index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class NativeMfaFactor(Base):
+    __tablename__ = "native_mfa_factors"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
+    factor_type: Mapped[str] = mapped_column(String(24), default="totp")
+    encrypted_secret: Mapped[str] = mapped_column(Text)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class NativeMfaRecoveryCode(Base):
+    __tablename__ = "native_mfa_recovery_codes"
+    __table_args__ = (UniqueConstraint("user_id", "code_hash", name="uq_native_mfa_recovery_user_code"),)
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    code_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

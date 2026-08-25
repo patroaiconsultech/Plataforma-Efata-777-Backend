@@ -11,7 +11,10 @@ from orkio_v2.models import (
     AccessGrantRedemption,
     AuditEvent,
     Membership,
+    NativeAuthChallenge,
     NativeCredential,
+    NativeMfaFactor,
+    NativeMfaRecoveryCode,
     NativePasswordReset,
     NativeSession,
     Tenant,
@@ -58,6 +61,9 @@ def _reset_identity_tables():
     with Testing() as db:
         for model in (
             NativeSession,
+            NativeAuthChallenge,
+            NativeMfaFactor,
+            NativeMfaRecoveryCode,
             NativePasswordReset,
             NativeCredential,
             AuditEvent,
@@ -113,13 +119,29 @@ def test_existing_legacy_admin_requires_claim_and_cannot_be_taken_over():
         json=_register_payload("victim@example.com"),
     )
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "ACCOUNT_CLAIM_REQUIRED"
+    assert response.status_code == 200
+    body = response.json()
+    assert body["authenticated"] is False
+    assert body["status"] == "ACCOUNT_RECOVERY_REQUIRED"
+    assert body["claim_token"]
+
+    recovery = TestClient(app).post(
+        "/api/v2/auth/account/recover",
+        json={
+            "token": body["claim_token"],
+            "password": "SenhaRecuperada777!",
+            "password_confirm": "SenhaRecuperada777!",
+        },
+    )
+    assert recovery.status_code == 200
+    assert recovery.json()["status"] == "ACCOUNT_RECOVERY_COMPLETE"
 
     with Testing() as db:
-        assert db.scalar(
+        credential = db.scalar(
             select(NativeCredential).where(NativeCredential.user_id == "legacy-admin")
-        ) is None
+        )
+        assert credential is not None
+        assert "SenhaRecuperada777!" not in credential.password_hash
         assert db.scalar(
             select(NativeSession).where(NativeSession.user_id == "legacy-admin")
         ) is None
@@ -132,7 +154,7 @@ def test_existing_legacy_admin_requires_claim_and_cannot_be_taken_over():
         assert membership is not None
         assert membership.role == "admin"
         assert membership.active is True
-        assert db.query(AccessGrantRedemption).count() == 0
+        assert db.query(AccessGrantRedemption).count() == 1
 
 
 def test_claim_guard_does_not_reactivate_inactive_membership():
@@ -162,7 +184,7 @@ def test_claim_guard_does_not_reactivate_inactive_membership():
     )
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "ACCOUNT_CLAIM_REQUIRED"
+    assert response.json()["detail"] == "ACCOUNT_RECOVERY_NOT_ALLOWED"
 
     with Testing() as db:
         membership = db.scalar(
