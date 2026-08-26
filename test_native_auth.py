@@ -4,6 +4,8 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+from orkio_v2.auth import Principal
+from orkio_v2.auth_routes import _session_out
 from orkio_v2.config import get_settings
 from orkio_v2.main import app
 from orkio_v2.models import (
@@ -137,6 +139,25 @@ def test_native_session_uses_configured_cookie_name(monkeypatch):
     assert "patroai_session_v2=" in boot.headers["set-cookie"]
     assert client.get("/api/v2/auth/session").status_code == 200
     assert client.get("/api/v2/agents").status_code == 200
+
+
+def test_mfa_challenge_is_not_advertised_as_authenticated_session():
+    response = _session_out(
+        Principal(
+            user_id="admin-1",
+            tenant_id="patroai",
+            roles=("admin",),
+            email="admin@patroai.com",
+            external_subject="native:admin@patroai.com",
+        ),
+        status="MFA_ENROLLMENT_REQUIRED",
+        challenge_token="challenge-token",
+        authenticated=False,
+    )
+
+    assert response.authenticated is False
+    assert response.status == "MFA_ENROLLMENT_REQUIRED"
+    assert response.challenge_token == "challenge-token"
 
 
 def test_native_password_hash_is_not_plaintext(monkeypatch):
