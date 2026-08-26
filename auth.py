@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from fastapi import Cookie, Depends, Header, HTTPException
+from fastapi import Cookie, Depends, Header, HTTPException, Request
 import httpx
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,7 @@ def require_principal(
     x_test_subject: str | None = Header(None, alias="X-Test-Subject"),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
+    request: Request = None,
 ) -> Principal:
     if settings.auth_mode == "test":
         if settings.environment not in {"test", "development"}:
@@ -49,7 +50,12 @@ def require_principal(
         raise HTTPException(status_code=401, detail="AUTH_PROVIDER_REQUIRED")
 
     if settings.auth_mode in {"native_session", "native_or_oidc"}:
-        token = native_session or legacy_native_session
+        configured_native_session = (
+            request.cookies.get(settings.native_session_cookie_name)
+            if request is not None
+            else None
+        )
+        token = configured_native_session or native_session or legacy_native_session
         principal = principal_from_session(db, token=token, settings=settings)
         if principal is not None:
             return principal
@@ -119,6 +125,6 @@ def require_admin(
     for backwards compatibility only and must never be used as a substitute
     for provisioned authorization.
     """
-    if not {"admin", "orkio_admin", "owner", "superadmin", "super_admin"}.intersection(principal.roles):
+    if not {"admin", "orkio_admin"}.intersection(principal.roles):
         raise HTTPException(403, "ADMIN_ROLE_REQUIRED")
     return principal

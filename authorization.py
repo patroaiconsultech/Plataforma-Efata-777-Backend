@@ -20,10 +20,6 @@ class ProvisionedAuthorizationError(ValueError):
         self.code = code
 
 
-_ADMIN_MEMBERSHIP_ROLES = frozenset({"admin", "orkio_admin", "owner", "superadmin", "super_admin"})
-_SUPERADMIN_MEMBERSHIP_ROLES = frozenset({"superadmin", "super_admin"})
-
-
 def resolve_provisioned_roles(
     db: Session,
     *,
@@ -52,19 +48,17 @@ def resolve_provisioned_roles(
     if not role:
         raise ProvisionedAuthorizationError("PRINCIPAL_NOT_PROVISIONED")
     roles = {role}
-    if role in _ADMIN_MEMBERSHIP_ROLES:
-        # As rotas existentes reconhecem admin; a elevação só nasce de uma
-        # Membership ativa e nunca de claims, cabeçalhos ou allowlist.
+    if role in {"owner", "superadmin"}:
         roles.add("admin")
-    if role in _SUPERADMIN_MEMBERSHIP_ROLES:
-        roles.update({"owner", "superadmin"})
+    if role == "superadmin":
+        roles.add("owner")
 
     owner_subject = (settings.platform_owner_subject or "").strip()
     if owner_subject and external_subject == owner_subject:
-        if role not in _ADMIN_MEMBERSHIP_ROLES:
+        if "admin" not in roles:
             raise ProvisionedAuthorizationError(
                 "PLATFORM_OWNER_ADMIN_MEMBERSHIP_REQUIRED"
             )
-        roles.add("platform_owner")
+        roles.update({"platform_owner", "owner", "superadmin", "admin"})
 
     return tuple(sorted(roles))

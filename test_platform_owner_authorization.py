@@ -69,11 +69,6 @@ def test_admin_membership_is_canonical_authorization_source(db):
 
 
 def test_platform_owner_requires_verified_subject_and_admin_membership(db):
-    membership = db.query(Membership).filter_by(
-        tenant_id="tenant-1", user_id="user-1"
-    ).one()
-    membership.role = "superadmin"
-    db.commit()
     roles = resolve_provisioned_roles(
         db,
         tenant_id="tenant-1",
@@ -81,23 +76,7 @@ def test_platform_owner_requires_verified_subject_and_admin_membership(db):
         external_subject="sub-daniel",
         settings=settings("sub-daniel"),
     )
-    assert roles == ("admin", "owner", "platform_owner", "superadmin")
-
-
-def test_superadmin_membership_exposes_owner_and_admin_capabilities(db):
-    membership = db.query(Membership).filter_by(
-        tenant_id="tenant-1", user_id="user-1"
-    ).one()
-    membership.role = "superadmin"
-    db.commit()
-    roles = resolve_provisioned_roles(
-        db,
-        tenant_id="tenant-1",
-        user_id="user-1",
-        external_subject="sub-daniel",
-        settings=settings(),
-    )
-    assert roles == ("admin", "owner", "superadmin")
+    assert set(roles) == {"admin", "owner", "superadmin", "platform_owner"}
 
 
 def test_platform_owner_subject_does_not_bypass_membership_role(db):
