@@ -69,11 +69,12 @@ def _session_out(
     status: str | None = None,
     challenge_token: str | None = None,
     recovery_codes: list[str] | None = None,
+    authenticated: bool | None = None,
 ) -> NativeSessionOut:
     if principal is None:
         return NativeSessionOut(authenticated=False, status=status, challenge_token=challenge_token)
     return NativeSessionOut(
-        authenticated=True,
+        authenticated=True if authenticated is None else authenticated,
         status=status or "AUTHENTICATED",
         user_id=principal.user_id,
         tenant_id=principal.tenant_id,
@@ -246,6 +247,7 @@ def native_login(
             result.principal,
             status=result.status,
             challenge_token=result.token,
+            authenticated=False,
         )
     _set_session_cookie(response, result.token, settings)
     return _session_out(result.principal)
