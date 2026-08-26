@@ -13,6 +13,7 @@ from .services.invitations import create_invitation, accept_invitation
 from .services.identity import (
     require_provisioned_principal,
     require_provisioned_admin,
+    require_provisioned_superadmin,
     require_known_principal,
     assert_provisioned,
 )
@@ -68,6 +69,7 @@ from .services.capability_plane import (
     runtime_capability_messages,
 )
 from .services.capability_policy import CapabilityPolicy, CapabilityPolicyError
+from .services.team_runtime import list_team_definitions, team_definition_payload
 from .services.internal_consultation import (
     InternalConsultationError,
     build_internal_consultation_context,
@@ -180,7 +182,7 @@ def rename_hyper_cocreator(
 
 @router.get("/admin/overview")
 def admin_overview(
-    p: Principal = Depends(require_provisioned_principal),
+    p: Principal = Depends(require_provisioned_superadmin),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
 ):
@@ -224,12 +226,93 @@ def admin_overview(
         "release_sha": settings.release_sha,
     }
 
+
+def _require_console_superadmin(p: Principal, settings: Settings) -> Principal:
+    return require_allowlisted_admin_principal(p, settings)
+
+
+@router.get("/admin/users")
+def admin_users(
+    p: Principal = Depends(require_provisioned_superadmin),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+):
+    _require_console_superadmin(p, settings)
+    rows = db.execute(
+        select(Membership, User)
+        .join(User, User.id == Membership.user_id)
+        .where(Membership.tenant_id == p.tenant_id)
+        .order_by(func.lower(User.email))
+    ).all()
+    return [
+        {
+            "user_id": user.id,
+            "email": user.email,
+            "display_name": user.display_name,
+            "role": membership.role,
+            "active": membership.active,
+            "email_verified": user.email_verified_at is not None,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+        }
+        for membership, user in rows
+    ]
+
+
+@router.get("/admin/agents")
+def admin_agents(
+    p: Principal = Depends(require_provisioned_superadmin),
+    settings: Settings = Depends(get_settings),
+):
+    _require_console_superadmin(p, settings)
+    return [
+        {
+            "slug": agent.slug,
+            "canonical_name": agent.canonical_name,
+            "display_name": agent.display_name,
+            "role_code": agent.role_code,
+            "role_label": agent.role_label,
+            "organizational_level": agent.organizational_level,
+            "department": agent.department,
+            "founder_direct_access": agent.founder_direct_access,
+            "target_kind": agent.target_kind.value,
+            "availability": availability_for(agent, settings).to_dict(),
+        }
+        for agent in list_agents()
+    ]
+
+
+@router.get("/admin/teams")
+def admin_teams(
+    p: Principal = Depends(require_provisioned_superadmin),
+    settings: Settings = Depends(get_settings),
+):
+    _require_console_superadmin(p, settings)
+    return [team_definition_payload(team, settings) for team in list_team_definitions()]
+
+
+@router.get("/admin/governance")
+def admin_governance(
+    p: Principal = Depends(require_provisioned_superadmin),
+    settings: Settings = Depends(get_settings),
+):
+    _require_console_superadmin(p, settings)
+    return {
+        "tenant_id": p.tenant_id,
+        "environment": settings.environment,
+        "release_sha": settings.release_sha,
+        "access_gate_enabled": settings.access_gate_enabled,
+        "artifacts_enabled": settings.artifacts_enabled,
+        "realtime_streaming_enabled": settings.realtime_streaming_enabled,
+        "voice_enabled": settings.voice_enabled,
+        "llm_primary_provider": settings.llm_primary_provider,
+    }
+
 @router.get("/agents")
 def agents_catalog(
     p: Principal = Depends(require_provisioned_principal),
     settings: Settings = Depends(get_settings),
 ):
-    admin = bool({"admin", "orkio_admin"}.intersection(p.roles))
+    admin = bool({"admin", "orkio_admin", "owner", "superadmin", "platform_owner"}.intersection(p.roles))
     catalog = list_agents()
     if not admin:
         catalog = tuple(agent for agent in catalog if agent.slug.lower() == "orkio")

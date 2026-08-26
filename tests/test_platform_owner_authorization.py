@@ -76,7 +76,7 @@ def test_platform_owner_requires_verified_subject_and_admin_membership(db):
         external_subject="sub-daniel",
         settings=settings("sub-daniel"),
     )
-    assert roles == ("admin", "platform_owner")
+    assert set(roles) == {"admin", "owner", "superadmin", "platform_owner"}
 
 
 def test_platform_owner_subject_does_not_bypass_membership_role(db):

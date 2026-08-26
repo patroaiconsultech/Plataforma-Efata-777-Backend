@@ -48,13 +48,17 @@ def resolve_provisioned_roles(
     if not role:
         raise ProvisionedAuthorizationError("PRINCIPAL_NOT_PROVISIONED")
     roles = {role}
+    if role in {"owner", "superadmin"}:
+        roles.add("admin")
+    if role == "superadmin":
+        roles.add("owner")
 
     owner_subject = (settings.platform_owner_subject or "").strip()
     if owner_subject and external_subject == owner_subject:
-        if role != "admin":
+        if "admin" not in roles:
             raise ProvisionedAuthorizationError(
                 "PLATFORM_OWNER_ADMIN_MEMBERSHIP_REQUIRED"
             )
-        roles.add("platform_owner")
+        roles.update({"platform_owner", "owner", "superadmin", "admin"})
 
     return tuple(sorted(roles))

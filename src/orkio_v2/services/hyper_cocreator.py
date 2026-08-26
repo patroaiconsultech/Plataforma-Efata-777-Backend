@@ -54,7 +54,7 @@ def admin_email_allowlist(settings: Settings) -> frozenset[str]:
 
 def is_allowlisted_admin(principal: Principal, settings: Settings) -> bool:
     return bool(
-        {"admin", "orkio_admin"}.intersection(principal.roles)
+        {"superadmin", "platform_owner"}.intersection(principal.roles)
         and normalize_email(principal.email) in admin_email_allowlist(settings)
     )
 

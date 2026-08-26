@@ -114,6 +114,31 @@ def test_native_bootstrap_login_session_and_logout(monkeypatch):
     assert denied.json()["detail"] == "NATIVE_SESSION_REQUIRED"
 
 
+def test_native_session_uses_configured_cookie_name(monkeypatch):
+    native_settings(monkeypatch)
+    monkeypatch.setenv("PLATFORM_NATIVE_SESSION_COOKIE_NAME", "patroai_session_v2")
+    get_settings.cache_clear()
+    reset_identity_tables()
+    client = TestClient(app)
+
+    boot = client.post(
+        "/api/v2/auth/bootstrap-owner",
+        json={
+            "bootstrap_secret": "b" * 40,
+            "tenant_id": "tenant-custom-cookie",
+            "tenant_name": "PatroAI Cookie",
+            "email": "cookie@patroai.com",
+            "display_name": "Cookie Owner",
+            "password": "SenhaForte777!",
+        },
+    )
+
+    assert boot.status_code == 200, boot.text
+    assert "patroai_session_v2=" in boot.headers["set-cookie"]
+    assert client.get("/api/v2/auth/session").status_code == 200
+    assert client.get("/api/v2/agents").status_code == 200
+
+
 def test_native_password_hash_is_not_plaintext(monkeypatch):
     native_settings(monkeypatch)
     reset_identity_tables()

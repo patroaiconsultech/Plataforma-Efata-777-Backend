@@ -95,6 +95,15 @@ def require_provisioned_admin(
     return principal
 
 
+def require_provisioned_superadmin(
+    principal: Principal = Depends(require_provisioned_principal),
+) -> Principal:
+    """Exige owner/superadmin derivado da membership e do sujeito configurado."""
+    if not {"superadmin", "platform_owner"}.intersection(principal.roles):
+        raise HTTPException(403, "SUPERADMIN_ROLE_REQUIRED")
+    return principal
+
+
 def require_known_principal(
     principal: Principal = Depends(require_principal),
     db: Session = Depends(get_db),

@@ -57,7 +57,7 @@ realtime_logger = logging.getLogger("uvicorn.error")
 
 
 def _effective_direct_agent(requested_target: str, principal: Principal) -> str:
-    if {"admin", "orkio_admin"}.intersection(principal.roles):
+    if {"admin", "orkio_admin", "owner", "superadmin", "platform_owner"}.intersection(principal.roles):
         return requested_target
     # O resolver usa o namespace técnico explícito para IDs de agentes.
     return "id:orkio"
